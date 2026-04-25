@@ -1,0 +1,15 @@
+# Agathon orchestrator runtime — pinned for Railway deployment.
+# These are *additive* on top of the existing AI Red toolkit's deps
+# (requests, etc.). Install with:
+#
+#   pip install -r requirements-agathon.txt
+#
+# In CI / dev where you don't need the FastAPI surface, you can skip
+# this file — the bridge (`forgeguard_bridge.py`) has zero new deps.
+
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.32,<0.33
+pydantic>=2.7,<3.0
+groq>=0.13,<2.0
+supabase>=2.10,<3.0
+websockets>=13.0,<14.0
