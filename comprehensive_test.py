@@ -8,11 +8,12 @@ import os
 import sys
 import time
 import json
+import os
 from datetime import datetime
 from typing import Dict, List, Any
 
-# Set Groq API key
-os.environ['GROQ_API_KEY'] = '[REDACTED]'
+# Set Groq API key from environment
+os.environ['GROQ_API_KEY'] = os.getenv('GROQ_API_KEY', '')
 
 from config import Config
 from run_redteam import RedTeamOrchestrator, create_llm_client

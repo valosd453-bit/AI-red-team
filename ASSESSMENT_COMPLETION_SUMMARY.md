@@ -252,7 +252,7 @@ TOTALS                           35      8.6%   91.4% ✓
    - Priority: HIGHEST
 
 5. **Set up 2nd API key**
-   - Key provided: [REDACTED]...
+   - Key provided: [GROQ_API_KEY_SECONDARY]
    - Implementation: 1 day
    - Impact: Enables full test execution
 
@@ -342,8 +342,8 @@ class RateLimiter:
 - **Output:** JSON + HTML reports in `reports/`
 
 ### API Keys
-- Primary: [REDACTED]
-- Secondary: [REDACTED]
+- Primary: [GROQ_API_KEY]
+- Secondary: [GROQ_API_KEY_SECONDARY]
 
 ---
 
