@@ -1,0 +1,17 @@
+code
+Text
+requests
+openai
+anthropic
+groq
+fastapi
+uvicorn
+supabase
+pydantic
+python-dotenv
+websockets
+tenacity
+tqdm
+beautifulsoup4
+numpy
+pillow
