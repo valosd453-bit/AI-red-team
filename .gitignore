@@ -1,88 +1,12 @@
-# Python cache files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environments
+﻿__pycache__/
+*.pyc
 .venv/
 venv/
-ENV/
-env/
-
-# Logs and runtime files
-*.log
-*.pot
-*.pyc
-*.pyo
-*.pyd
-
-# Distribution / packaging
-build/
-dist/
-.eggs/
-*.egg-info/
-
-# macOS
-.DS_Store
-
-# VS Code
-.vscode/
-
-# Reports and test outputs
-reports/
-test_*.json
-test_*.html
-*.report
-
-# Environment files
 .env
 .env.local
-.env.production
-.env.development
-
-# Node.js (for merged frontend)
-node_modules/
-.next/
-dist/
-out/
-.nuxt/
-.cache/
-
-# IDE and editor files
-.idea/
-*.swp
-*.swo
-*~
-
-# OS generated files
-Thumbs.db
+.env.*.local
+*.log
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Temporary files
-*.tmp
-*.temp
-*.bak
-
-# Database files
-*.db
-*.sqlite
-*.sqlite3
-
-# Coverage reports
-.coverage
-htmlcov/
+*.egg-info/
 .pytest_cache/
-.tox/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# Secrets and keys
-secrets.json
-config/secrets.py
+node_modules/

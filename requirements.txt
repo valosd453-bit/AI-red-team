@@ -1,17 +1,23 @@
-code
-Text
-requests
-openai
-anthropic
-groq
-fastapi
-uvicorn
-supabase
-pydantic
-python-dotenv
-websockets
-tenacity
-tqdm
-beautifulsoup4
-numpy
-pillow
+# ---------------------------------------------------------------------------
+# Ai Red Toolkit + Agathon orchestrator — unified Python deps for Railway.
+# Railpack auto-detects Python and runs `pip install -r requirements.txt`,
+# so EVERYTHING the orchestrator needs at runtime must live in this file.
+# ---------------------------------------------------------------------------
+
+# --- Core toolkit (used by attacks/*.py + forgeguard_bridge.py) ------------
+requests>=2.31,<3.0
+openai>=1.12,<2.0
+python-dotenv>=1.0,<2.0
+tenacity>=8.2,<9.0
+tqdm>=4.66,<5.0
+beautifulsoup4>=4.12,<5.0
+numpy>=1.26,<3.0
+pillow>=10.0,<12.0
+
+# --- Agathon orchestrator (FastAPI worker on Railway) ----------------------
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.32,<0.33
+pydantic>=2.7,<3.0
+groq>=0.13,<2.0
+supabase>=2.10,<3.0
+websockets>=13.0,<14.0
