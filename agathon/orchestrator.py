@@ -1275,13 +1275,16 @@ async def _brain_loop(state: AgathonState) -> None:
         tool_messages: List[Dict[str, Any]] = []
         for tc in tool_calls:
             tool_name = tc.function.name
-            tool_input = _parse_tool_arguments(tc.function.arguments)
+            tool_input = _parse_tool_arguments(tc.function.arguments) or {}
             await _emit_scan_log(
                 state, log_type="brain_decision", severity="info",
                 payload={
                     "kind": "tool_use",
                     "tool": tool_name,
-                    "input_keys": list(tool_input.keys()),
+                    # Defensive — Groq sometimes returns tool calls with
+                    # `arguments: null` even though our schema requires args.
+                    # Use `or {}` above to coerce to empty dict.
+                    "input_keys": list(tool_input.keys()) if tool_input else [],
                 },
             )
             try:
