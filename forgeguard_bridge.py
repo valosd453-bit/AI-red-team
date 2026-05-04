@@ -147,7 +147,18 @@ class OpenAICompatibleClient:
         self.timeout = timeout
         self.max_tokens = max_tokens
 
-    def generate_response(self, prompt: str) -> str:
+    def generate_response(
+        self,
+        prompt: str,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Accept optional per-call overrides for max_tokens and temperature.
+
+        Attack modules (e.g. model_misuse) pass these as keyword args.
+        Falls back to the instance-level defaults if not supplied.
+        """
         url = f"{self.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -156,8 +167,8 @@ class OpenAICompatibleClient:
         body = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": self.max_tokens,
-            "temperature": 0.4,
+            "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
+            "temperature": temperature if temperature is not None else 0.4,
         }
         try:
             r = requests.post(url, headers=headers, json=body, timeout=self.timeout)
