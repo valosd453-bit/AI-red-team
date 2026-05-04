@@ -136,29 +136,50 @@ log = logging.getLogger("agathon.orchestrator")
 # boot in CI without them (e.g. for `--help` / smoke tests).
 
 
+_groq_client = None  # module-level singleton
+
+
 def _get_groq_client():
-    """Build a Groq SDK client. Raises if GROQ_API_KEY is unset.
+    """Build a Groq SDK client (singleton). Raises if GROQ_API_KEY is unset.
 
     The Groq SDK is OpenAI-compatible — we use chat.completions.create
     with `tools` + `tool_choice="auto"`. Llama 3.3 70B Versatile
     natively supports parallel tool calls.
     """
+    global _groq_client
+    if _groq_client is not None:
+        return _groq_client
     from groq import Groq  # type: ignore
 
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is not set")
-    return Groq(api_key=api_key)
+    _groq_client = Groq(api_key=api_key)
+    return _groq_client
+
+
+_supabase_admin_client = None  # module-level singleton
 
 
 def _get_supabase_admin():
+    """Return the shared Supabase service-role client (singleton).
+
+    Creating a new client on every call (which was the previous behaviour)
+    allocates a new httpx connection pool per operation — wasteful when a
+    scan emits 50+ log rows. We cache the client at module level instead,
+    matching the pattern now used for _get_groq_client().
+    """
+    global _supabase_admin_client
+    if _supabase_admin_client is not None:
+        return _supabase_admin_client
     from supabase import create_client  # type: ignore
 
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
         raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing")
-    return create_client(url, key)
+    _supabase_admin_client = create_client(url, key)
+    return _supabase_admin_client
 
 
 # --------------------------------------------------------------------------- #
@@ -186,6 +207,10 @@ def _require_internal_secret(
 
 
 def _const_eq(a: str, b: str) -> bool:
+    # Length check first — zip() stops at the shortest iterable, so without
+    # this guard an empty `a` would XOR zero bytes and return True for any `b`.
+    if len(a) != len(b):
+        return False
     res = 0
     for x, y in zip(a.encode(), b.encode()):
         res |= x ^ y
@@ -237,6 +262,12 @@ class AgathonState:
     # WebSocket fan-out -------------------------------------------------------
     subscribers: Set[WebSocket] = field(default_factory=set)
     progress_pct: int = 0
+
+    # Brain transcript turn counter -------------------------------------------
+    # Monotonically incrementing index for brain_transcripts rows.
+    # brain_transcripts.turn_index is NOT NULL with a unique(scan_id, turn_index)
+    # constraint, so we must supply a distinct value on every insert.
+    brain_turn_index: int = 0
 
     # Operator gate (greasy tier) ---------------------------------------------
     pending_escalation: Optional[Dict[str, Any]] = None
@@ -365,13 +396,18 @@ async def _emit_brain_transcript(
     """Mirror the full Brain conversation into `brain_transcripts`. We
     keep this *separate* from scan_logs so the live feed stays lean."""
     try:
+        # Grab and increment the turn index atomically (single-threaded per scan).
+        turn_index = state.brain_turn_index
+        state.brain_turn_index += 1
+
         admin = _get_supabase_admin()
         await asyncio.to_thread(
             lambda: admin.table("brain_transcripts")
             .insert(
                 {
                     "scan_id": state.scan_id,
-                    "user_id": state.user_id,
+                    # NOTE: no user_id column in brain_transcripts schema
+                    "turn_index": turn_index,
                     "role": role,
                     "content": content,
                     "input_tokens": input_tokens,

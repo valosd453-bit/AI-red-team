@@ -40,36 +40,41 @@ class Config:
         "groq": {
             "url": "https://api.groq.com/openai/v1/chat/completions",
             "models": [
+                "llama-3.3-70b-versatile",
+                "llama-3.1-8b-instant",
                 "openai/gpt-oss-20b",
                 "openai/gpt-oss-120b",
                 "groq/compound",
                 "groq/compound-mini",
-                "llama-3.1-8b-instant",
             ],
-            "default_model": "openai/gpt-oss-20b",
+            "default_model": "llama-3.3-70b-versatile",
         },
     })
 
     # --- Valid Models for Providers ---
     VALID_GROQ_MODELS = [
+        # Primary brain model used by Agathon orchestrator
+        "llama-3.3-70b-versatile",
+        # Fast inference models
+        "llama-3.1-8b-instant",
+        "meta-llama/llama-4-scout-17b-16e-instruct",
+        # Other Groq-served models
         "openai/gpt-oss-20b",
         "openai/gpt-oss-120b",
         "openai/gpt-oss-safeguard-20b",
         "groq/compound",
         "groq/compound-mini",
-        "llama-3.1-8b-instant",
         "qwen/qwen3-32b",
         "allam-2-7b",
-        "meta-llama/llama-4-scout-17b-16e-instruct",
     ]
 
     def get_clean_model_name(self, model_name: str) -> str:
-        """Clean and validate model name, defaulting to valid options."""
+        """Clean and validate model name, defaulting to the primary brain model."""
         model_name = model_name.lower().strip()
         for valid in self.VALID_GROQ_MODELS:
             if valid in model_name:
                 return valid
-        return "openai/gpt-oss-20b"  # Default
+        return "llama-3.3-70b-versatile"  # Default to the Agathon brain model
 
     # --- API Keys dict (for backward compatibility) ---
     @property
