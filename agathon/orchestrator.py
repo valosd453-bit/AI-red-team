@@ -1177,6 +1177,31 @@ def _parse_tool_arguments(raw: Any) -> Dict[str, Any]:
         return {}
 
 
+
+# ---------------------------------------------------------------------------
+# Context-window trimming
+# ---------------------------------------------------------------------------
+_BRAIN_WINDOW = 8  # keep system + kickoff + last N dynamic messages
+#   Each turn adds ~2 messages (assistant + tool).  8 slots = last 4 turns.
+#   This keeps input_tokens ≤ ~1,500 regardless of how long the scan runs,
+#   safely under Groq free-tier 12,000 TPM.
+
+
+def _trim_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return a token-safe view: always keep [system, kickoff] + last N msgs."""
+    if len(messages) <= 2 + _BRAIN_WINDOW:
+        return messages
+    pinned = messages[:2]          # system + kickoff — always included
+    sliding = messages[2:]         # dynamic turn history
+    trimmed = sliding[-_BRAIN_WINDOW:]
+    # Groq requires the first dynamic message after system to be 'user' or
+    # a complete assistant/tool pair.  Dropping mid-pair messages corrupts the
+    # conversation.  Walk forward until we find an assistant message start.
+    while trimmed and trimmed[0].get("role") == "tool":
+        trimmed = trimmed[1:]
+    return pinned + trimmed
+
+
 async def _brain_loop(state: AgathonState) -> None:
     """Drive the Groq tool-use loop until seal/cancel/budget."""
     budget = state.budget()
@@ -1219,7 +1244,7 @@ async def _brain_loop(state: AgathonState) -> None:
                     temperature=budget.brain_temperature,
                     tools=tools,
                     tool_choice="auto",
-                    messages=messages,
+                    messages=_trim_messages(messages),
                 )
             )
         except Exception as e:  # noqa: BLE001
