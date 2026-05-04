@@ -1385,8 +1385,8 @@ async def _brain_loop(state: AgathonState) -> None:
         # Rate-limit guard: Groq free tier allows ~30 req/min and ~6000 TPM on
         # llama-3.3-70b-versatile. Without a pause the brain loop saturates
         # the quota in ~3 turns and the 429 retry delays compound to 20s+.
-        # 2 seconds between turns keeps us well under the limit.
-        await asyncio.sleep(2.0)
+        # 3 seconds between turns keeps us at ~20 req/min (free tier: 30 req/min, 1k req/day).
+        await asyncio.sleep(3.0)
 
 
 def _serialise_assistant_message(msg: Dict[str, Any]) -> Dict[str, Any]:
