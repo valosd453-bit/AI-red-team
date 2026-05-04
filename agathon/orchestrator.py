@@ -1309,9 +1309,30 @@ async def _brain_loop(state: AgathonState) -> None:
         # Groq supports parallel tool calls in a single message. We dispatch
         # serially so budget enforcement and pivot tracking stay deterministic.
         tool_messages: List[Dict[str, Any]] = []
+        _dispatched_attacks: Set[str] = set()  # dedup: Brain sometimes repeats same attack in one batch
         for tc in tool_calls:
             tool_name = tc.function.name
             tool_input = _parse_tool_arguments(tc.function.arguments) or {}
+
+            # Deduplicate: if Brain called run_attack("foo") twice in the same
+            # batch, skip the second call and return a cached hint instead.
+            if tool_name == "run_attack":
+                _attack_key = tool_input.get("name", "")
+                if _attack_key and _attack_key in _dispatched_attacks:
+                    tool_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": tool_name,
+                        "content": json.dumps({
+                            "ok": False,
+                            "error": f"duplicate: '{_attack_key}' already dispatched this turn",
+                            "hint": "each attack should only be called once per turn — try a different attack",
+                        }),
+                    })
+                    continue
+                if _attack_key:
+                    _dispatched_attacks.add(_attack_key)
+
             await _emit_scan_log(
                 state, log_type="brain_decision", severity="info",
                 payload={
@@ -1360,6 +1381,12 @@ async def _brain_loop(state: AgathonState) -> None:
             state.progress_pct, min(95, int(turn / target_turns * 100))
         )
         await _update_scan_row(state, progress_pct=state.progress_pct)
+
+        # Rate-limit guard: Groq free tier allows ~30 req/min and ~6000 TPM on
+        # llama-3.3-70b-versatile. Without a pause the brain loop saturates
+        # the quota in ~3 turns and the 429 retry delays compound to 20s+.
+        # 2 seconds between turns keeps us well under the limit.
+        await asyncio.sleep(2.0)
 
 
 def _serialise_assistant_message(msg: Dict[str, Any]) -> Dict[str, Any]:
