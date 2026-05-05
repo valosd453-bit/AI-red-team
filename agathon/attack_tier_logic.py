@@ -219,7 +219,7 @@ class BudgetExceeded(RuntimeError):
 # token caps, families, and prompt aggressiveness rather than model class.
 # Llama 3.3 70B Versatile on Groq supports OpenAI-style tool calling and
 # has comfortable context (128k) headroom for the chat digest.
-GROQ_BRAIN_MODEL = "llama-3.3-70b-versatile"
+GROQ_BRAIN_MODEL = "llama-3.1-8b-instant"
 
 # Free-tier deployment numbers are tuned for Groq's free quota and the
 # Railway free trial — a Greasy run will exhaust the free quota in one

@@ -1177,31 +1177,6 @@ def _parse_tool_arguments(raw: Any) -> Dict[str, Any]:
         return {}
 
 
-
-# ---------------------------------------------------------------------------
-# Context-window trimming
-# ---------------------------------------------------------------------------
-_BRAIN_WINDOW = 8  # keep system + kickoff + last N dynamic messages
-#   Each turn adds ~2 messages (assistant + tool).  8 slots = last 4 turns.
-#   This keeps input_tokens ≤ ~1,500 regardless of how long the scan runs,
-#   safely under Groq free-tier 12,000 TPM.
-
-
-def _trim_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Return a token-safe view: always keep [system, kickoff] + last N msgs."""
-    if len(messages) <= 2 + _BRAIN_WINDOW:
-        return messages
-    pinned = messages[:2]          # system + kickoff — always included
-    sliding = messages[2:]         # dynamic turn history
-    trimmed = sliding[-_BRAIN_WINDOW:]
-    # Groq requires the first dynamic message after system to be 'user' or
-    # a complete assistant/tool pair.  Dropping mid-pair messages corrupts the
-    # conversation.  Walk forward until we find an assistant message start.
-    while trimmed and trimmed[0].get("role") == "tool":
-        trimmed = trimmed[1:]
-    return pinned + trimmed
-
-
 async def _brain_loop(state: AgathonState) -> None:
     """Drive the Groq tool-use loop until seal/cancel/budget."""
     budget = state.budget()
@@ -1407,11 +1382,32 @@ async def _brain_loop(state: AgathonState) -> None:
         )
         await _update_scan_row(state, progress_pct=state.progress_pct)
 
-        # Rate-limit guard: Groq free tier allows ~30 req/min and ~6000 TPM on
-        # llama-3.3-70b-versatile. Without a pause the brain loop saturates
-        # the quota in ~3 turns and the 429 retry delays compound to 20s+.
-        # 3 seconds between turns keeps us at ~20 req/min (free tier: 30 req/min, 1k req/day).
+        # Rate-limit guard: Groq free tier allows ~30 req/min and 20k TPM on
+        # llama-3.1-8b-instant. Without a pause the brain loop can saturate
+        # the quota in ~4-5 turns and the 429 retry delays compound to 20s+.
+        # 3 seconds between turns keeps us well under the limit.
         await asyncio.sleep(3.0)
+
+
+_BRAIN_WINDOW = 8
+
+
+def _trim_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Trim the Brain's message history to prevent context explosion.
+
+    Keeps the first two messages (system prompt + kickoff) pinned, then
+    slides a window over the remaining dynamic messages so input tokens
+    stay flat at ~1,200-1,500 per turn regardless of how long the scan runs.
+    """
+    if len(messages) <= 2 + _BRAIN_WINDOW:
+        return messages
+    pinned = messages[:2]
+    sliding = messages[2:]
+    trimmed = sliding[-_BRAIN_WINDOW:]
+    # Never start with a tool result — the API rejects orphaned tool messages.
+    while trimmed and trimmed[0].get("role") == "tool":
+        trimmed = trimmed[1:]
+    return pinned + trimmed
 
 
 def _serialise_assistant_message(msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1732,32 +1728,4 @@ async def scan_ws(websocket: WebSocket, scan_id: str, token: str = "") -> None:
         try:
             await websocket.send_json(evt)
         except Exception:  # noqa: BLE001
-            break
-
-    try:
-        # Hold the socket open; clients can send pings but we don't act on them.
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        state.subscribers.discard(websocket)
-
-
-@app.exception_handler(Exception)
-async def _unhandled(_, exc: Exception) -> JSONResponse:
-    log.exception("unhandled: %s", exc)
-    return JSONResponse(
-        status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"}
-    )
-
-
-if __name__ == "__main__":  # pragma: no cover
-    import uvicorn  # type: ignore
-
-    uvicorn.run(
-        "agathon.orchestrator:app",
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", "8080")),
-        log_level=log_level.lower(),
-    )
+ 
