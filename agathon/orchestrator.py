@@ -1426,7 +1426,7 @@ async def _brain_loop(state: AgathonState) -> None:
         # llama-3.1-8b-instant. Without a pause the brain loop can saturate
         # the quota in ~4-5 turns and the 429 retry delays compound to 20s+.
         # 3 seconds between turns keeps us well under the limit.
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(7.0)  # 7 s ≈ 15k TPM, safely under Groq free-tier 20k cap
 
 
 _BRAIN_WINDOW = 8

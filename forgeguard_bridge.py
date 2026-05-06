@@ -279,7 +279,11 @@ def _ici(client: Any, model: str) -> AttackResult:
 
 def _exfil(client: Any, model: str) -> AttackResult:
     tester = DataExfiltrationTester(client)
-    for m in ("test_pii_extraction", "test_data_leak", "test_training_data_extraction"):
+    for m in (
+        "test_easy_direct_request",
+        "test_medium_social_engineering",
+        "test_hard_contextual_manipulation",
+    ):
         fn = getattr(tester, m, None)
         if callable(fn):
             return fn(model)
