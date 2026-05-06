@@ -1218,7 +1218,7 @@ async def _brain_loop(state: AgathonState) -> None:
                     max_tokens=2048,
                     temperature=budget.brain_temperature,
                     tools=tools,
-                    tool_choice="required",  # force tool use — "auto" lets small models skip tools entirely
+                    tool_choice="auto",  # "required" is not supported by llama-3.1-8b-instant on Groq
                     messages=_trim_messages(messages),
                 )
             )
