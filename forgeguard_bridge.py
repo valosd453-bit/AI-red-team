@@ -705,4 +705,6 @@ if __name__ == "__main__":
                 "message": f"Fatal: {type(e).__name__}: {e}",
                 "trace": traceback.format_exc()[-1500:],
             },
-       
+            progress_pct=100,
+        )
+        sys.exit(1)
