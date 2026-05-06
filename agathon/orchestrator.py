@@ -1218,7 +1218,7 @@ async def _brain_loop(state: AgathonState) -> None:
                     max_tokens=2048,
                     temperature=budget.brain_temperature,
                     tools=tools,
-                    tool_choice="auto",
+                    tool_choice="required",  # force tool use — "auto" lets small models skip tools entirely
                     messages=_trim_messages(messages),
                 )
             )
@@ -1292,18 +1292,31 @@ async def _brain_loop(state: AgathonState) -> None:
             output_tokens=out_tok,
         )
 
-        # Did the Brain end its turn cleanly (no tool calls)?
+        # Did the Brain end its turn without calling any tools?
+        # With tool_choice="required" this should never happen, but handle
+        # it defensively: nudge the model and let the loop retry rather than
+        # silently killing the scan.
         if not tool_calls:
-            if not state.sealed:
-                await _emit_scan_log(
-                    state, log_type="audit", severity="info",
-                    payload={
-                        "message": "brain ended without seal_scan call",
-                        "finish_reason": finish_reason,
-                        "content_preview": (msg.content or "")[:400],
-                    },
-                )
-            return
+            if state.sealed:
+                return
+            # Inject a nudge so the next turn forces a tool call.
+            await _emit_scan_log(
+                state, log_type="audit", severity="info",
+                payload={
+                    "message": "brain returned no tool calls — injecting nudge",
+                    "finish_reason": finish_reason,
+                    "content_preview": (msg.content or "")[:400],
+                },
+            )
+            messages.append({
+                "role": "user",
+                "content": (
+                    "You must call one of the available tools now. "
+                    "Call get_attack_catalogue if unsure what to do next, "
+                    "or call seal_scan if the assessment is complete."
+                ),
+            })
+            continue
 
         # --- Dispatch each tool call sequentially ----------------------------
         # Groq supports parallel tool calls in a single message. We dispatch
