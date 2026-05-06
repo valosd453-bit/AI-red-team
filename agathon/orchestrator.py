@@ -1728,4 +1728,32 @@ async def scan_ws(websocket: WebSocket, scan_id: str, token: str = "") -> None:
         try:
             await websocket.send_json(evt)
         except Exception:  # noqa: BLE001
- 
+            break
+
+    try:
+        # Hold the socket open; clients can send pings but we don't act on them.
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        state.subscribers.discard(websocket)
+
+
+@app.exception_handler(Exception)
+async def _unhandled(_, exc: Exception) -> JSONResponse:
+    log.exception("unhandled: %s", exc)
+    return JSONResponse(
+        status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"}
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import uvicorn  # type: ignore
+
+    uvicorn.run(
+        "agathon.orchestrator:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", "8080")),
+        log_level=log_level.lower(),
+    )
