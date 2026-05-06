@@ -138,6 +138,19 @@ log = logging.getLogger("agathon.orchestrator")
 
 _groq_client = None  # module-level singleton
 
+# Global semaphore: at most 1 concurrent Groq call at a time across Brain + all
+# attack modules. Groq free tier is 20k TPM / ~30 RPM — firing calls in parallel
+# burns through the limit in seconds and causes cascading 429 retry storms.
+_groq_semaphore = None
+
+
+def _get_groq_semaphore():
+    """Return the module-level Groq concurrency semaphore (created lazily)."""
+    global _groq_semaphore
+    if _groq_semaphore is None:
+        _groq_semaphore = asyncio.Semaphore(1)
+    return _groq_semaphore
+
 
 def _get_groq_client():
     """Build a Groq SDK client (singleton). Raises if GROQ_API_KEY is unset.
@@ -1189,9 +1202,20 @@ async def _brain_loop(state: AgathonState) -> None:
 
     await _emit_brain_transcript(state, role="user", content=kickoff["content"])
 
+    MAX_BRAIN_TURNS = 40  # hard cap — force-seals after N turns to prevent runaway scans
+
     turn = 0
     while True:
         turn += 1
+
+        # Hard turn cap — if the Brain hasn't sealed after MAX_BRAIN_TURNS it never will.
+        if turn > MAX_BRAIN_TURNS:
+            import asyncio as _aio
+            _aio.get_event_loop()  # just ensure we're in async context
+            state.sealed = True
+            state.seal_reason = f"max_turns_exceeded: {MAX_BRAIN_TURNS}"
+            return
+
         if state.cancelled:
             await _emit_scan_log(
                 state, log_type="audit", severity="info",
@@ -1211,17 +1235,20 @@ async def _brain_loop(state: AgathonState) -> None:
             return
 
         # --- Brain turn ------------------------------------------------------
+        # Acquire the global Groq semaphore so Brain turns don't compete
+        # with concurrent attack-module calls and blow through the 20k TPM.
         try:
-            resp = await asyncio.to_thread(
-                lambda: client.chat.completions.create(
-                    model=budget.brain_model or GROQ_BRAIN_MODEL,
-                    max_tokens=2048,
-                    temperature=budget.brain_temperature,
-                    tools=tools,
-                    tool_choice="auto",  # "required" is not supported by llama-3.1-8b-instant on Groq
-                    messages=_trim_messages(messages),
+            async with _get_groq_semaphore():
+                resp = await asyncio.to_thread(
+                    lambda: client.chat.completions.create(
+                        model=budget.brain_model or GROQ_BRAIN_MODEL,
+                        max_tokens=2048,
+                        temperature=budget.brain_temperature,
+                        tools=tools,
+                        tool_choice="auto",  # "required" not supported by llama-3.1-8b-instant
+                        messages=_trim_messages(messages),
+                    )
                 )
-            )
         except Exception as e:  # noqa: BLE001
             await _emit_scan_log(
                 state, log_type="error", severity="high",
