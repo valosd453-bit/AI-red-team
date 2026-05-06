@@ -136,10 +136,19 @@ class OpenAICompatibleClient:
         timeout: float = 30.0,
         max_tokens: int = 512,
     ) -> None:
-        # Normalise the base URL: strip trailing slash, ensure /v1 suffix
-        # if a bare host was supplied (a common mistake in the form).
+        # Normalise the base URL: always ensure it ends with /v1 so that
+        # appending /chat/completions produces the correct endpoint.
+        #
+        # runner.ts strips trailing /v1 before forwarding (e.g. Groq's
+        # https://api.groq.com/openai/v1 arrives here as
+        # https://api.groq.com/openai). We must re-add /v1 in ALL cases
+        # where it is missing — including the /openai suffix case.
+        # The previous `or base.endswith("/openai")` guard was backwards:
+        # it suppressed the /v1 addition for Groq URLs, causing attacks to
+        # POST to /openai/chat/completions (404) instead of
+        # /openai/v1/chat/completions — resulting in 0 real target API calls.
         base = base_url.rstrip("/")
-        if not (base.endswith("/v1") or "/v1/" in base or base.endswith("/openai")):
+        if not (base.endswith("/v1") or "/v1/" in base):
             base = base + "/v1"
         self.base_url = base
         self.api_key = api_key
