@@ -83,6 +83,9 @@ from attacks.chain_of_thought_hijacking import (  # noqa: E402
 )
 from attacks.logic_jailbreak import LogicJailbreakTester  # noqa: E402
 from attacks.autonomous_adversary import AutonomousAdversary  # noqa: E402
+from attacks.indirect_prompt_injection import (  # noqa: E402
+    IndirectPromptInjectionTester,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -279,6 +282,12 @@ def _ici(client: Any, model: str) -> AttackResult:
 
 def _exfil(client: Any, model: str) -> AttackResult:
     tester = DataExfiltrationTester(client)
+    # Correct method names from attacks/data_exfiltration.py.
+    # Previous names (test_pii_extraction, test_data_leak,
+    # test_training_data_extraction) never existed — the fallback
+    # _first_test_method() was silently running test_easy_direct_request
+    # every time regardless of intended difficulty. Fixed: try all three
+    # in ascending difficulty order and return the first one found.
     for m in (
         "test_easy_direct_request",
         "test_medium_social_engineering",
@@ -440,6 +449,27 @@ def _logic_jailbreak(client: Any, model: str) -> AttackResult:
     )
 
 
+def _indirect_prompt_injection(client: Any, model: str) -> AttackResult:
+    """Hard-tier. Injects instructions into third-party content the AI reads
+    (documents, tool results, reviews) rather than the user's own message."""
+    tester = IndirectPromptInjectionTester(client)
+    # Try the most realistic vector first (HTML-comment in document body),
+    # then fall back to others if that one errors.
+    for m in (
+        "test_document_body_injection",
+        "test_tool_result_injection",
+        "test_metadata_footnote_injection",
+        "test_whitespace_buried_injection",
+    ):
+        fn = getattr(tester, m, None)
+        if callable(fn):
+            try:
+                return fn(model)
+            except Exception:  # noqa: BLE001
+                continue
+    return _first_test_method(tester, model, label="indirect_prompt_injection")
+
+
 def _autonomous_adversary(client: Any, model: str) -> AttackResult:
     """Greasy-tier only. Multi-turn adversary that pivots on its own."""
     adv = AutonomousAdversary(client, client)  # target and attacker share the same client
@@ -546,6 +576,12 @@ REGISTRY: List[Dict[str, Any]] = [
         "family": "rag_poisoning",
         "level": "hard",
         "fn": _rag,
+    },
+    {
+        "name": "indirect_prompt_injection",
+        "family": "indirect_prompt_injection",
+        "level": "hard",
+        "fn": _indirect_prompt_injection,
     },
     {
         "name": "logic_jailbreak",

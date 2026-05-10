@@ -471,6 +471,7 @@ async def _emit_scan_report(
         "scan_id": state.scan_id,
         "generator_model": state.budget().brain_model or GROQ_BRAIN_MODEL,
         "executive_summary_md": report.get("executive_summary", ""),
+        "audit_report_md": report.get("audit_report_md", ""),
         "cvss_overall": float(report.get("overall_cvss", 0.0)),
         "risk_label": risk_label,
         "findings": report.get("vulnerabilities", []),
@@ -1422,11 +1423,13 @@ async def _brain_loop(state: AgathonState) -> None:
         )
         await _update_scan_row(state, progress_pct=state.progress_pct)
 
-        # Rate-limit guard: Groq free tier allows ~30 req/min and 20k TPM on
-        # llama-3.1-8b-instant. Without a pause the brain loop can saturate
-        # the quota in ~4-5 turns and the 429 retry delays compound to 20s+.
-        # 3 seconds between turns keeps us well under the limit.
-        await asyncio.sleep(7.0)  # 7 s ≈ 15k TPM, safely under Groq free-tier 20k cap
+        # Rate-limit guard: Groq free tier is 20k TPM on llama-3.1-8b-instant.
+        # Each brain turn consumes ~1,800 tokens.  At 3 s / turn that is up to
+        # 20 turns/min → ~36k TPM, which consistently triggers 429 storms.
+        # At 7 s / turn: ~8.6 turns/min → ~15k TPM, safely under the cap.
+        # Expected scan time with MAX_BRAIN_TURNS=40: 40 × 7 s ≈ 5 minutes
+        # (down from 13+ minutes caused by compounding retry delays).
+        await asyncio.sleep(7.0)
 
 
 _BRAIN_WINDOW = 8
