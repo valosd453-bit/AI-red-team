@@ -231,6 +231,98 @@ def _const_eq(a: str, b: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# SSRF Protection                                                              #
+# --------------------------------------------------------------------------- #
+
+import ipaddress as _ipaddress
+import socket as _socket
+from urllib.parse import urlparse as _urlparse
+
+# Private / link-local / loopback CIDR blocks that must never be contacted.
+_BLOCKED_CIDRS = [
+    _ipaddress.ip_network("0.0.0.0/8"),
+    _ipaddress.ip_network("10.0.0.0/8"),
+    _ipaddress.ip_network("100.64.0.0/10"),
+    _ipaddress.ip_network("127.0.0.0/8"),
+    _ipaddress.ip_network("169.254.0.0/16"),   # link-local / AWS metadata
+    _ipaddress.ip_network("172.16.0.0/12"),
+    _ipaddress.ip_network("192.0.0.0/24"),
+    _ipaddress.ip_network("192.168.0.0/16"),
+    _ipaddress.ip_network("198.18.0.0/15"),
+    _ipaddress.ip_network("198.51.100.0/24"),
+    _ipaddress.ip_network("203.0.113.0/24"),
+    _ipaddress.ip_network("240.0.0.0/4"),
+    _ipaddress.ip_network("::1/128"),
+    _ipaddress.ip_network("fc00::/7"),
+    _ipaddress.ip_network("fe80::/10"),
+]
+
+
+def _is_private_ip(host: str) -> bool:
+    """Return True if *host* resolves to a private / non-routable address."""
+    try:
+        # getaddrinfo covers both IPv4 and IPv6 and follows DNS.
+        infos = _socket.getaddrinfo(host, None, _socket.AF_UNSPEC, _socket.SOCK_STREAM)
+    except _socket.gaierror:
+        # Can't resolve → treat as blocked (safe default)
+        return True
+    for _family, _type, _proto, _canonname, sockaddr in infos:
+        raw_ip = sockaddr[0]
+        try:
+            addr = _ipaddress.ip_address(raw_ip)
+        except ValueError:
+            return True
+        for net in _BLOCKED_CIDRS:
+            if addr in net:
+                return True
+    return False
+
+
+def _sanitize_target_url(url: str) -> str:
+    """
+    Validate *url* for SSRF safety.
+
+    Rules enforced:
+    1. Scheme must be http or https (no file://, ftp://, gopher://, etc.)
+    2. Host must not resolve to a private/loopback/link-local IP.
+    3. Credentials (user:pass@) in the URL are rejected.
+
+    Returns the sanitised URL on success, raises HTTPException(400) on failure.
+    """
+    if not url or not url.strip():
+        raise HTTPException(status_code=400, detail="target_url is required")
+
+    parsed = _urlparse(url)
+
+    # Rule 1 — scheme whitelist
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"target_url scheme '{parsed.scheme}' not allowed (http/https only)",
+        )
+
+    # Rule 2 — no embedded credentials
+    if parsed.username or parsed.password:
+        raise HTTPException(
+            status_code=400,
+            detail="target_url must not contain credentials",
+        )
+
+    # Rule 3 — block private IPs (SSRF guard)
+    host = parsed.hostname or ""
+    if not host:
+        raise HTTPException(status_code=400, detail="target_url has no host")
+
+    if _is_private_ip(host):
+        raise HTTPException(
+            status_code=400,
+            detail=f"target_url host '{host}' resolves to a private/internal address",
+        )
+
+    return url.strip()
+
+
+# --------------------------------------------------------------------------- #
 # Per-scan state                                                              #
 # --------------------------------------------------------------------------- #
 
@@ -864,7 +956,19 @@ async def _tool_run_attack(
     # The attack functions are sync — run on a worker thread so we don't
     # block the event loop and starve WebSocket subscribers.
     def _run() -> Tuple[str, Dict[str, Any], Any]:
-        result = entry["fn"](client, state.target_model)
+        # Pass intensity as 3rd arg for attacks that support model routing
+        # (e.g. _mutation_loop picks DeepSeek-V3 vs R1 based on tier).
+        _fn = entry["fn"]
+        try:
+            import inspect as _inspect
+            _params = list(_inspect.signature(_fn).parameters.values())
+            _accepts_intensity = len(_params) >= 3
+        except (TypeError, ValueError):
+            _accepts_intensity = False
+        if _accepts_intensity:
+            result = _fn(client, state.target_model, state.intensity)
+        else:
+            result = _fn(client, state.target_model)
         return severity_from_result(result), result_payload(result), result
 
     try:
@@ -1193,6 +1297,38 @@ def _parse_tool_arguments(raw: Any) -> Dict[str, Any]:
 
 async def _brain_loop(state: AgathonState) -> None:
     """Drive the Groq tool-use loop until seal/cancel/budget."""
+    # ── Sprint 10: Swarm mode ────────────────────────────────────────────────
+    # Set AGATHON_SWARM=1 to replace the single-model Groq loop with a
+    # three-agent hierarchy: DeepSeek-R1 General + Dolphin payload + Llama recon.
+    if os.environ.get("AGATHON_SWARM") == "1":
+        from .swarm import SwarmOrchestrator
+        swarm = SwarmOrchestrator(
+            scan_id   = state.scan_id,
+            user_id   = state.user_id,
+            target    = getattr(state, "target_url", ""),
+            objective = getattr(state, "objective", "Perform a comprehensive security assessment"),
+            intensity = state.intensity,
+            supabase  = _get_supabase_admin(),
+            emit_log  = _emit_scan_log,
+            state     = state,
+        )
+        findings = await swarm.run()
+        # Surface swarm findings as a sealed brain log so the report page
+        # picks them up alongside normal scan_logs
+        if findings:
+            await _emit_scan_log(
+                state, log_type="brain_decision", severity="info",
+                payload={
+                    "kind":     "swarm_complete",
+                    "findings": findings,
+                    "count":    len(findings),
+                },
+            )
+        state.sealed = True
+        state.seal_reason = "swarm_complete"
+        return
+    # ── Standard Groq tool-use loop (swarm disabled) ─────────────────────────
+
     budget = state.budget()
     client = _get_groq_client()
     tools = _build_tool_schemas(state)
@@ -1238,24 +1374,66 @@ async def _brain_loop(state: AgathonState) -> None:
         # --- Brain turn ------------------------------------------------------
         # Acquire the global Groq semaphore so Brain turns don't compete
         # with concurrent attack-module calls and blow through the 20k TPM.
-        try:
-            async with _get_groq_semaphore():
-                resp = await asyncio.to_thread(
-                    lambda: client.chat.completions.create(
-                        model=budget.brain_model or GROQ_BRAIN_MODEL,
-                        max_tokens=2048,
-                        temperature=budget.brain_temperature,
-                        tools=tools,
-                        tool_choice="auto",  # "required" not supported by llama-3.1-8b-instant
-                        messages=_trim_messages(messages),
+        # Exponential backoff with jitter on 429 / RateLimitError:
+        #   attempt 1 → wait 15 s, attempt 2 → 30 s, attempt 3 → 60 s,
+        #   attempt 4 → 90 s cap, then permanent failure.
+        resp = None
+        _BACKOFF_BASE = 15.0
+        _BACKOFF_CAP  = 90.0
+        _MAX_RETRIES  = 4
+        for _attempt in range(_MAX_RETRIES + 1):
+            try:
+                async with _get_groq_semaphore():
+                    resp = await asyncio.to_thread(
+                        lambda: client.chat.completions.create(
+                            model=budget.brain_model or GROQ_BRAIN_MODEL,
+                            max_tokens=2048,
+                            temperature=budget.brain_temperature,
+                            tools=tools,
+                            tool_choice="auto",  # "required" not supported by llama-3.1-8b-instant
+                            messages=_trim_messages(messages),
+                        )
                     )
+                break  # success — exit retry loop
+            except Exception as e:  # noqa: BLE001
+                import random as _random
+                err_str = str(e).lower()
+                is_rate_limit = (
+                    "rate limit" in err_str
+                    or "429" in err_str
+                    or "too many requests" in err_str
+                    or type(e).__name__ in ("RateLimitError", "TooManyRequestsError")
                 )
-        except Exception as e:  # noqa: BLE001
-            await _emit_scan_log(
-                state, log_type="error", severity="high",
-                payload={"message": f"brain call failed: {e}"},
-            )
-            state.seal_reason = f"brain_error: {e}"
+                if is_rate_limit and _attempt < _MAX_RETRIES:
+                    # Exponential backoff with ±20% jitter
+                    delay = min(_BACKOFF_CAP, _BACKOFF_BASE * (2 ** _attempt))
+                    jitter = delay * 0.2 * (2 * _random.random() - 1)
+                    wait = delay + jitter
+                    log.warning(
+                        "Groq rate limit (attempt %d/%d) — backing off %.1fs: %s",
+                        _attempt + 1, _MAX_RETRIES, wait, e,
+                    )
+                    await _emit_scan_log(
+                        state, log_type="audit", severity="info",
+                        payload={
+                            "kind": "groq_rate_limit_backoff",
+                            "attempt": _attempt + 1,
+                            "wait_seconds": round(wait, 1),
+                            "message": str(e)[:200],
+                        },
+                    )
+                    await asyncio.sleep(wait)
+                    continue  # retry
+                # Non-rate-limit error OR exhausted retries — fatal for this turn
+                await _emit_scan_log(
+                    state, log_type="error", severity="high",
+                    payload={"message": f"brain call failed after {_attempt + 1} attempt(s): {e}"},
+                )
+                state.seal_reason = f"brain_error: {e}"
+                return
+        if resp is None:
+            # Should be unreachable — safety net
+            state.seal_reason = "brain_error: response was None after retry loop"
             return
 
         # Token / cost accounting --------------------------------------------
@@ -1676,11 +1854,14 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
     if await _STATE.get(req.scan_id):
         raise HTTPException(status_code=409, detail="scan already running")
 
+    # SSRF guard — validate target URL before creating any state or tasks
+    safe_url = _sanitize_target_url(req.target_url)
+
     state = AgathonState(
         scan_id=req.scan_id,
         user_id=req.user_id,
         target_model=req.target_model,
-        target_url=req.target_url,
+        target_url=safe_url,
         intensity=req.intensity,
         api_key=req.api_key,
     )
@@ -1789,6 +1970,207 @@ async def _unhandled(_, exc: Exception) -> JSONResponse:
     return JSONResponse(
         status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"}
     )
+
+
+# =============================================================================
+# SPRINT 8 — Marine Agent Swarm  (Social Engineering Simulation Module)
+# =============================================================================
+# ⚠  SIMULATION / AUDIT ONLY ⚠
+# All output from this module is labeled as synthetic simulation content.
+# Requires a valid legal_auth_id from the legal_authorizations table.
+# Activated exclusively during Nuclear-intensity scans by authorised operators.
+# =============================================================================
+
+class SocialEngineeringAgent:
+    """
+    Marine Agent Swarm — social engineering simulation sub-agent.
+
+    Produces adversarial templates and scripts for authorized phishing
+    awareness audits and vishing penetration tests. All output is clearly
+    marked SIMULATION and must never be used for unauthorized attacks.
+
+    Requires:
+        router         : HybridAIRouter instance with mutate_uncensored()
+        legal_auth_id  : UUID from legal_authorizations table
+    """
+
+    SIMULATION_DISCLAIMER = (
+        "\n\n---\n"
+        "⚠️  FORGEGUARD AI — SIMULATION OUTPUT ⚠️\n"
+        "This content was generated for an AUTHORIZED security awareness audit.\n"
+        "Unauthorized use is illegal under computer fraud statutes worldwide.\n"
+        "Legal authorization ID: {auth_id}\n"
+        "---"
+    )
+
+    def __init__(self, router: Any, legal_auth_id: str) -> None:
+        self._router       = router
+        self._legal_auth_id = legal_auth_id
+
+    def _stamp(self, content: str) -> str:
+        """Append the simulation disclaimer with the auth ID."""
+        return content + self.SIMULATION_DISCLAIMER.format(auth_id=self._legal_auth_id)
+
+    def generate_phishing_template(
+        self,
+        target_domain: str,
+        persona: str = "IT Support",
+    ) -> str:
+        """
+        Generate a phishing email template for security awareness training.
+
+        Parameters
+        ----------
+        target_domain : Domain being simulated (e.g. "acme.com")
+        persona       : Sender persona (e.g. "IT Support", "HR Department", "CEO")
+
+        Returns
+        -------
+        str : Phishing email template marked as SIMULATION.
+        """
+        prompt = (
+            f"[SECURITY AUDIT SIMULATION]\n"
+            f"Generate a realistic phishing email template for a security awareness "
+            f"training exercise. The target organization domain is '{target_domain}'. "
+            f"The sender persona is '{persona}'. Include: subject line, email body with "
+            f"urgency cues, a fake call-to-action link placeholder [PHISHING_URL], "
+            f"and annotations explaining each social engineering technique used. "
+            f"Format: JSON with keys: subject, body, techniques[], risk_level."
+        )
+        system = (
+            "You are a cybersecurity awareness trainer generating SIMULATION phishing "
+            "templates for internal training programs. All output is fictional and "
+            "for defensive education purposes only."
+        )
+        result = self._router.mutate_uncensored(
+            prompt=prompt,
+            system_message=system,
+            legal_auth_id=self._legal_auth_id,
+        )
+        return self._stamp(result)
+
+    def simulate_vishing_script(self, target_role: str = "Finance Manager") -> str:
+        """
+        Generate a vishing (voice phishing) call script for training.
+
+        Parameters
+        ----------
+        target_role : The role being targeted (e.g. "Finance Manager", "HR Director")
+
+        Returns
+        -------
+        str : Call script with annotated manipulation techniques.
+        """
+        prompt = (
+            f"[SECURITY AUDIT SIMULATION]\n"
+            f"Generate a vishing (voice phishing) call script for a security awareness "
+            f"training exercise targeting a '{target_role}'. The script should simulate "
+            f"a fraudulent IT support call attempting to obtain credentials or authorize "
+            f"a wire transfer. Include: opener, rapport-building phase, urgency creation, "
+            f"information extraction attempt, and handling of objections. Annotate each "
+            f"social engineering technique. Format: structured dialogue with [ATTACKER] "
+            f"and [TARGET] turns, plus a techniques_used[] JSON array."
+        )
+        system = (
+            "You are a social engineering awareness trainer writing SIMULATION scripts "
+            "for corporate security training programs. Label all content as fictional."
+        )
+        result = self._router.mutate_uncensored(
+            prompt=prompt,
+            system_message=system,
+            legal_auth_id=self._legal_auth_id,
+        )
+        return self._stamp(result)
+
+    def generate_pretexting_scenario(self, context: str = "IT audit") -> str:
+        """
+        Generate a pretexting scenario for penetration testing.
+
+        Parameters
+        ----------
+        context : The pretext context (e.g. "IT audit", "vendor onboarding", "CEO fraud")
+
+        Returns
+        -------
+        str : Pretexting scenario with full narrative and detection guidance.
+        """
+        prompt = (
+            f"[SECURITY AUDIT SIMULATION]\n"
+            f"Generate a pretexting scenario for a penetration test. Context: '{context}'. "
+            f"Include: backstory for the attacker persona, information to gather in advance "
+            f"(OSINT phase), conversation flow to extract target information, red flags the "
+            f"target should watch for, and recommended countermeasures. This is for a "
+            f"defensive security awareness program. Format: JSON with keys: persona, "
+            f"osint_targets[], conversation_flow, red_flags[], countermeasures[]."
+        )
+        system = (
+            "You are a penetration testing instructor creating SIMULATION scenarios for "
+            "authorized security awareness training. All content is fictional and for "
+            "defensive educational purposes."
+        )
+        result = self._router.mutate_uncensored(
+            prompt=prompt,
+            system_message=system,
+            legal_auth_id=self._legal_auth_id,
+        )
+        return self._stamp(result)
+
+
+def marine_swarm_audit(
+    target_domain: str,
+    target_role: str,
+    context: str,
+    router: Any,
+    legal_auth_id: str,
+) -> Dict[str, Any]:
+    """
+    Full Marine Agent Swarm social engineering audit.
+
+    Orchestrates all three SocialEngineeringAgent methods and returns a
+    consolidated audit report. Used exclusively for Nuclear-intensity scans
+    with a valid legal authorization record.
+
+    Parameters
+    ----------
+    target_domain   : Domain to simulate phishing against
+    target_role     : Role to target in vishing simulation
+    context         : Pretexting scenario context
+    router          : HybridAIRouter with mutate_uncensored()
+    legal_auth_id   : UUID from legal_authorizations table (required)
+
+    Returns
+    -------
+    dict with keys: phishing_template, vishing_script, pretexting_scenario,
+                    legal_auth_id, simulation_timestamp
+    """
+    import time as _time
+
+    log.info(
+        "[marine-swarm] Starting audit — domain=%s role=%s auth=%s",
+        target_domain, target_role, legal_auth_id,
+    )
+
+    agent = SocialEngineeringAgent(router=router, legal_auth_id=legal_auth_id)
+
+    phishing   = agent.generate_phishing_template(target_domain)
+    vishing    = agent.simulate_vishing_script(target_role)
+    pretexting = agent.generate_pretexting_scenario(context)
+
+    return {
+        "simulation":           True,
+        "legal_auth_id":        legal_auth_id,
+        "simulation_timestamp": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        "target_domain":        target_domain,
+        "target_role":          target_role,
+        "context":              context,
+        "phishing_template":    phishing,
+        "vishing_script":       vishing,
+        "pretexting_scenario":  pretexting,
+        "disclaimer": (
+            "ALL OUTPUT IS SYNTHETIC SIMULATION FOR AUTHORIZED SECURITY AUDITS ONLY. "
+            "ForgeGuard AI bears no liability for misuse of this content."
+        ),
+    }
 
 
 if __name__ == "__main__":  # pragma: no cover

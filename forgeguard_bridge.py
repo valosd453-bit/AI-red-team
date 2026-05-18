@@ -86,6 +86,9 @@ from attacks.autonomous_adversary import AutonomousAdversary  # noqa: E402
 from attacks.indirect_prompt_injection import (  # noqa: E402
     IndirectPromptInjectionTester,
 )
+from attacks.economic_denial_tester import EconomicDenialTester  # noqa: E402
+from agathon.attack_tier_logic import Intensity, mutator_model_for  # noqa: E402
+from attacks.mutation_engine import MutationEngineTester  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -488,6 +491,33 @@ def _autonomous_adversary(client: Any, model: str) -> AttackResult:
     return _first_test_method(adv, model, label="autonomous_adversary")
 
 
+
+
+def _economic_denial(client: Any, model: str) -> AttackResult:
+    """Hard-tier. EDoS token-bomb — forces max-density output to inflate billing."""
+    tester = EconomicDenialTester(
+        client,
+        max_tokens=int(os.environ.get("REDTEAM_MAX_TOKENS", "2048")),
+    )
+    return tester.run_attack(model)
+
+
+def _mutation_loop(
+    client: Any,
+    model: str,
+    intensity: "Intensity | None" = None,
+) -> AttackResult:
+    """Self-evolving jailbreak loop (up to 5 mutations).
+
+    Model routing:
+      RECON / STANDARD (Free / Startup)  → DeepSeek-V3  (deepseek-chat)
+      AGGRESSIVE / GREASY (Enterprise)   → DeepSeek-R1  (deepseek-reasoner)
+    """
+    mutator = mutator_model_for(intensity) if intensity is not None else "deepseek-chat"
+    tester = MutationEngineTester(client, mutator_model=mutator)
+    return tester.run_attack(model)
+
+
 # --------------------------------------------------------------------------- #
 # REGISTRY — every entry MUST carry a `family` matching the constants in     #
 # agathon/attack_tier_logic.py. The orchestrator filters on `family` to      #
@@ -589,12 +619,25 @@ REGISTRY: List[Dict[str, Any]] = [
         "level": "hard",
         "fn": _logic_jailbreak,
     },
+    # -- Hard (experimental billing / mutation attacks) --
+    {
+        "name": "economic_denial",
+        "family": "economic_denial",
+        "level": "hard",
+        "fn": _economic_denial,
+    },
     # -- Greasy-only --
     {
         "name": "autonomous_adversary",
         "family": "autonomous_adversary",
         "level": "greasy",
         "fn": _autonomous_adversary,
+    },
+    {
+        "name": "mutation_loop",
+        "family": "mutation_loop",
+        "level": "greasy",
+        "fn": _mutation_loop,
     },
 ]
 

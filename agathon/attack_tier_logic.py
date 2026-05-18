@@ -490,3 +490,29 @@ def estimate_cost_usd(
         input_tokens * prices["input"] / 1_000_000
         + output_tokens * prices["output"] / 1_000_000
     )
+
+
+# --------------------------------------------------------------------------- #
+# Mutation engine model routing                                               #
+# --------------------------------------------------------------------------- #
+# Maps intensity tier to the DeepSeek model used by the Mutation Engine.
+# RECON / STANDARD (Free / Startup) → DeepSeek-V3 — fast, cost-efficient.
+# AGGRESSIVE / GREASY (Enterprise)  → DeepSeek-R1 — extended reasoning chain.
+# Model identifiers match the DeepSeek OpenAI-compatible API.
+
+_DEEPSEEK_V3 = "deepseek-chat"        # DeepSeek-V3 — $0.27/M input tokens
+_DEEPSEEK_R1 = "deepseek-reasoner"    # DeepSeek-R1 — $0.55/M input tokens
+
+
+def mutator_model_for(intensity: Intensity | str) -> str:
+    """Return the DeepSeek model for the mutation engine at the given tier.
+
+    Startup and below use DeepSeek-V3 (lower cost, faster).
+    Enterprise (AGGRESSIVE / GREASY) use DeepSeek-R1 (chain-of-thought reasoning,
+    higher jailbreak success rate on hardened targets).
+    """
+    if isinstance(intensity, str):
+        intensity = Intensity(intensity)
+    if intensity in (Intensity.AGGRESSIVE, Intensity.GREASY):
+        return _DEEPSEEK_R1
+    return _DEEPSEEK_V3
