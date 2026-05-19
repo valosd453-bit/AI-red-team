@@ -82,6 +82,7 @@ if str(_AI_RED_ROOT) not in sys.path:
 
 # Third-party
 from fastapi import (  # noqa: E402
+    BackgroundTasks,
     Depends,
     FastAPI,
     Header,
@@ -2171,6 +2172,51 @@ def marine_swarm_audit(
             "ForgeGuard AI bears no liability for misuse of this content."
         ),
     }
+
+
+
+# ── Recon endpoints ──────────────────────────────────────────────────────────
+
+class ReconStartRequest(BaseModel):
+    recon_id: str = Field(..., description="UUID of recon_targets row")
+    target: str = Field(..., description="Domain, IP, or URL to scan")
+    depth: int = Field(default=2, ge=1, le=5)
+
+
+@app.post("/recon/start", status_code=202)
+async def start_recon(
+    payload: ReconStartRequest,
+    background_tasks: BackgroundTasks,
+    _auth: str = Depends(_require_internal_secret),
+) -> JSONResponse:
+    """Kick off a background recon job."""
+    from agathon.recon import run_recon  # lazy import to avoid circular deps
+
+    sb = _get_supabase_admin()
+    background_tasks.add_task(
+        run_recon,
+        recon_id=payload.recon_id,
+        target=payload.target,
+        depth=payload.depth,
+        supabase_admin=sb,
+    )
+    return JSONResponse({"ok": True, "recon_id": payload.recon_id}, status_code=202)
+
+
+@app.get("/recon/{recon_id}/status")
+async def get_recon_status(
+    recon_id: str,
+    _auth: str = Depends(_require_internal_secret),
+) -> JSONResponse:
+    """Poll the status of a recon job."""
+    sb = _get_supabase_admin()
+    result = sb.table("recon_targets").select(
+        "id, target, status, surface_map, started_at, completed_at, error_msg"
+    ).eq("id", recon_id).execute()
+    rows = result.data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="Recon job not found")
+    return JSONResponse({"ok": True, "recon": rows[0]})
 
 
 if __name__ == "__main__":  # pragma: no cover

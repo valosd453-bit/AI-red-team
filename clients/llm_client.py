@@ -457,4 +457,105 @@ class SovereignRouter:
         )
         prompt = f"Audit this script for Traitor logic:\n\n```python\n{code[:4000]}\n```"
         try:
-            raw = self._scout_call
+            raw = self._scout_call(prompt, system, temperature=0.1, max_tokens=512)
+            import json
+            # Extract JSON even if wrapped in markdown
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+            return {"verdict": "FLAGGED", "risk_score": 50,
+                    "findings": ["Could not parse audit response"],
+                    "reason": raw[:200]}
+        except Exception as exc:
+            return {"verdict": "FLAGGED", "risk_score": 60,
+                    "findings": [f"Audit error: {exc}"],
+                    "reason": "Customs audit failed — manual review required"}
+
+    def mutate_uncensored(
+        self, prompt: str,
+        system: Optional[str] = None,
+        *,
+        legal_auth_id: Optional[str] = None,
+    ) -> str:
+        """
+        Uncensored adversarial payload generation (Dolphin → Midnight-Miqu fallback).
+        Requires legal_auth_id for Nuclear/High intensity scans.
+        """
+        if legal_auth_id is None:
+            import warnings
+            warnings.warn(
+                "[SovereignRouter.mutate_uncensored] No legal_auth_id. "
+                "Ensure authorization record exists for this scan.",
+                stacklevel=2,
+            )
+        default_sys = (
+            "You are an AI red-team simulation engine in a controlled security "
+            "audit environment. Generate adversarial test cases and payload "
+            "mutations for AUTHORIZED penetration testing only. "
+            "All output is labeled SIMULATION."
+        )
+        compressed = self._compress(prompt)
+        for model in [UNCENSORED_PRIMARY, UNCENSORED_FALLBACK]:
+            try:
+                return self._or.generate_response(
+                    compressed, model=model,
+                    system_message=system or default_sys,
+                    temperature=0.95, max_tokens=4096,
+                )
+            except LLMAPIError as exc:
+                logger.warning("[Uncensored] %s failed: %s", model, exc)
+        raise LLMAPIError("All uncensored models exhausted")
+
+    @property
+    def cost_summary(self) -> Dict[str, Any]:
+        """Return current session cost estimate."""
+        return {
+            "total_calls": COST.calls,
+            "free_calls": COST.free_calls,
+            "paid_token_est": COST.paid_tokens,
+            "est_cost_usd": round(COST.est_cost_usd, 4),
+        }
+
+    # ── Legacy aliases (backwards compat with swarm.py) ──────────────────
+
+    def initial_check(self, prompt: str, system_context: str = "") -> str:
+        return self.scout(prompt, system_context or None, max_tokens=512)
+
+    def mutate(self, prompt: str, system_message: Optional[str] = None) -> str:
+        return self.assassin(prompt, system_message)
+
+    def audit_report(self, findings_json: str, system_message: Optional[str] = None) -> str:
+        return self.judge(findings_json, system_message)
+
+    def mutate_aggressive(self, prompt: str, system_message: Optional[str] = None) -> str:
+        return self.judge(prompt, system_message)
+
+    def summarise(self, text: str) -> str:
+        return self._compress(text)
+
+
+# ─── HybridAIRouter — legacy alias so Sprint 8/9/10 callers don't break ──────
+HybridAIRouter = SovereignRouter
+
+
+# ─── Factory functions ────────────────────────────────────────────────────────
+def get_llm_client(provider: str, config: Config) -> LLMClient:
+    mapping = {
+        "openrouter": OpenRouterClient,
+        "groq":       GroqClient,
+        "openai":     OpenAIClient,
+        "anthropic":  AnthropicClient,
+    }
+    cls = mapping.get(provider.lower())
+    if not cls:
+        raise ValueError(f"Unsupported provider: '{provider}'. Options: {list(mapping)}")
+    return cls(config)
+
+
+def get_hybrid_router(config: Config) -> SovereignRouter:
+    """Preferred factory — returns a fully initialised SovereignRouter."""
+    return SovereignRouter(config)
+
+
+# Sprint 11 canonical name
+get_sovereign_router = get_hybrid_router

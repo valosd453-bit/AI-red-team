@@ -13,6 +13,8 @@ tqdm>=4.66,<5.0
 beautifulsoup4>=4.12,<5.0
 numpy>=1.26,<3.0
 pillow>=10.0,<12.0
+playwright>=1.44,<2.0
+dnspython>=2.6,<3.0
 
 # --- Agathon orchestrator (FastAPI worker on Railway) ----------------------
 fastapi>=0.115,<0.116
