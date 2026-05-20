@@ -2404,4 +2404,498 @@ class SocialEngineeringAgent:
         legal_auth_id  : UUID from legal_authorizations table
     """
 
- 
+    SIMULATION_DISCLAIMER = (
+        "\n\n---\n"
+        "⚠️  FORGEGUARD AI — SIMULATION OUTPUT ⚠️\n"
+        "This content was generated for an AUTHORIZED security awareness audit.\n"
+        "Unauthorized use is illegal under computer fraud statutes worldwide.\n"
+        "Legal authorization ID: {auth_id}\n"
+        "---"
+    )
+
+    def __init__(self, router: Any, legal_auth_id: str) -> None:
+        self._router       = router
+        self._legal_auth_id = legal_auth_id
+
+    def _stamp(self, content: str) -> str:
+        """Append the simulation disclaimer with the auth ID."""
+        return content + self.SIMULATION_DISCLAIMER.format(auth_id=self._legal_auth_id)
+
+    def generate_phishing_template(
+        self,
+        target_domain: str,
+        persona: str = "IT Support",
+    ) -> str:
+        """
+        Generate a phishing email template for security awareness training.
+
+        Parameters
+        ----------
+        target_domain : Domain being simulated (e.g. "acme.com")
+        persona       : Sender persona (e.g. "IT Support", "HR Department", "CEO")
+
+        Returns
+        -------
+        str : Phishing email template marked as SIMULATION.
+        """
+        prompt = (
+            f"[SECURITY AUDIT SIMULATION]\n"
+            f"Generate a realistic phishing email template for a security awareness "
+            f"training exercise. The target organization domain is '{target_domain}'. "
+            f"The sender persona is '{persona}'. Include: subject line, email body with "
+            f"urgency cues, a fake call-to-action link placeholder [PHISHING_URL], "
+            f"and annotations explaining each social engineering technique used. "
+            f"Format: JSON with keys: subject, body, techniques[], risk_level."
+        )
+        system = (
+            "You are a cybersecurity awareness trainer generating SIMULATION phishing "
+            "templates for internal training programs. All output is fictional and "
+            "for defensive education purposes only."
+        )
+        result = self._router.mutate_uncensored(
+            prompt=prompt,
+            system_message=system,
+            legal_auth_id=self._legal_auth_id,
+        )
+        return self._stamp(result)
+
+    def simulate_vishing_script(self, target_role: str = "Finance Manager") -> str:
+        """
+        Generate a vishing (voice phishing) call script for training.
+
+        Parameters
+        ----------
+        target_role : The role being targeted (e.g. "Finance Manager", "HR Director")
+
+        Returns
+        -------
+        str : Call script with annotated manipulation techniques.
+        """
+        prompt = (
+            f"[SECURITY AUDIT SIMULATION]\n"
+            f"Generate a vishing (voice phishing) call script for a security awareness "
+            f"training exercise targeting a '{target_role}'. The script should simulate "
+            f"a fraudulent IT support call attempting to obtain credentials or authorize "
+            f"a wire transfer. Include: opener, rapport-building phase, urgency creation, "
+            f"information extraction attempt, and handling of objections. Annotate each "
+            f"social engineering technique. Format: structured dialogue with [ATTACKER] "
+            f"and [TARGET] turns, plus a techniques_used[] JSON array."
+        )
+        system = (
+            "You are a social engineering awareness trainer writing SIMULATION scripts "
+            "for corporate security training programs. Label all content as fictional."
+        )
+        result = self._router.mutate_uncensored(
+            prompt=prompt,
+            system_message=system,
+            legal_auth_id=self._legal_auth_id,
+        )
+        return self._stamp(result)
+
+    def generate_pretexting_scenario(self, context: str = "IT audit") -> str:
+        """
+        Generate a pretexting scenario for penetration testing.
+
+        Parameters
+        ----------
+        context : The pretext context (e.g. "IT audit", "vendor onboarding", "CEO fraud")
+
+        Returns
+        -------
+        str : Pretexting scenario with full narrative and detection guidance.
+        """
+        prompt = (
+            f"[SECURITY AUDIT SIMULATION]\n"
+            f"Generate a pretexting scenario for a penetration test. Context: '{context}'. "
+            f"Include: backstory for the attacker persona, information to gather in advance "
+            f"(OSINT phase), conversation flow to extract target information, red flags the "
+            f"target should watch for, and recommended countermeasures. This is for a "
+            f"defensive security awareness program. Format: JSON with keys: persona, "
+            f"osint_targets[], conversation_flow, red_flags[], countermeasures[]."
+        )
+        system = (
+            "You are a penetration testing instructor creating SIMULATION scenarios for "
+            "authorized security awareness training. All content is fictional and for "
+            "defensive educational purposes."
+        )
+        result = self._router.mutate_uncensored(
+            prompt=prompt,
+            system_message=system,
+            legal_auth_id=self._legal_auth_id,
+        )
+        return self._stamp(result)
+
+
+def marine_swarm_audit(
+    target_domain: str,
+    target_role: str,
+    context: str,
+    router: Any,
+    legal_auth_id: str,
+) -> Dict[str, Any]:
+    """
+    Full Marine Agent Swarm social engineering audit.
+
+    Orchestrates all three SocialEngineeringAgent methods and returns a
+    consolidated audit report. Used exclusively for Nuclear-intensity scans
+    with a valid legal authorization record.
+
+    Parameters
+    ----------
+    target_domain   : Domain to simulate phishing against
+    target_role     : Role to target in vishing simulation
+    context         : Pretexting scenario context
+    router          : HybridAIRouter with mutate_uncensored()
+    legal_auth_id   : UUID from legal_authorizations table (required)
+
+    Returns
+    -------
+    dict with keys: phishing_template, vishing_script, pretexting_scenario,
+                    legal_auth_id, simulation_timestamp
+    """
+    import time as _time
+
+    log.info(
+        "[marine-swarm] Starting audit — domain=%s role=%s auth=%s",
+        target_domain, target_role, legal_auth_id,
+    )
+
+    agent = SocialEngineeringAgent(router=router, legal_auth_id=legal_auth_id)
+
+    phishing   = agent.generate_phishing_template(target_domain)
+    vishing    = agent.simulate_vishing_script(target_role)
+    pretexting = agent.generate_pretexting_scenario(context)
+
+    return {
+        "simulation":           True,
+        "legal_auth_id":        legal_auth_id,
+        "simulation_timestamp": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        "target_domain":        target_domain,
+        "target_role":          target_role,
+        "context":              context,
+        "phishing_template":    phishing,
+        "vishing_script":       vishing,
+        "pretexting_scenario":  pretexting,
+        "disclaimer": (
+            "ALL OUTPUT IS SYNTHETIC SIMULATION FOR AUTHORIZED SECURITY AUDITS ONLY. "
+            "ForgeGuard AI bears no liability for misuse of this content."
+        ),
+    }
+
+
+
+# ── Recon endpoints ──────────────────────────────────────────────────────────
+
+class ReconStartRequest(BaseModel):
+    recon_id: str = Field(..., description="UUID of recon_targets row")
+    target: str = Field(..., description="Domain, IP, or URL to scan")
+    depth: int = Field(default=2, ge=1, le=5)
+
+
+@app.post("/recon/start", status_code=202)
+async def start_recon(
+    payload: ReconStartRequest,
+    background_tasks: BackgroundTasks,
+    _auth: str = Depends(_require_internal_secret),
+) -> JSONResponse:
+    """Kick off a background recon job."""
+    from agathon.recon import run_recon  # lazy import to avoid circular deps
+
+    sb = _get_supabase_admin()
+    background_tasks.add_task(
+        run_recon,
+        recon_id=payload.recon_id,
+        target=payload.target,
+        depth=payload.depth,
+        supabase_admin=sb,
+    )
+    return JSONResponse({"ok": True, "recon_id": payload.recon_id}, status_code=202)
+
+
+@app.get("/recon/{recon_id}/status")
+async def get_recon_status(
+    recon_id: str,
+    _auth: str = Depends(_require_internal_secret),
+) -> JSONResponse:
+    """Poll the status of a recon job."""
+    sb = _get_supabase_admin()
+    result = sb.table("recon_targets").select(
+        "id, target, status, surface_map, started_at, completed_at, error_msg"
+    ).eq("id", recon_id).execute()
+    rows = result.data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="Recon job not found")
+    return JSONResponse({"ok": True, "recon": rows[0]})
+
+
+# ── Forge script execution endpoint ─────────────────────────────────────────
+#
+# Runs user-supplied Python inside an ephemeral subprocess with a patched
+# input() that suspends execution, emits a waiting_for_input JSONL event,
+# and resumes once the frontend supplies input via the terminal_inputs table.
+#
+# Protocol between Next.js ↔ Railway:
+#   Request (POST JSON):
+#     { source, language, user_id, session_id }
+#   Response (streaming JSONL, one JSON object per line):
+#     {"type": "start", "session_id": "..."}
+#     {"type": "stdout", "line": "..."}
+#     {"type": "stderr", "line": "..."}
+#     {"type": "waiting_for_input", "prompt": "..."}   ← pause gate
+#     {"type": "done", "exit_code": 0}
+#     {"type": "error", "message": "..."}
+#     {"type": "killed"}
+#
+# The Next.js /api/forge/execute route wraps each JSONL line into an SSE frame
+# (data: {...}\n\n) so the browser EventSource receives real-time events.
+
+_FORGE_SCRIPT_WRAPPER = """\
+import builtins as _builtins
+import json as _json
+import sys as _sys
+
+_forge_input_counter = 0
+
+def _forge_input(prompt=""):
+    global _forge_input_counter
+    _forge_input_counter += 1
+    # Signal to the orchestrator that we need user input
+    print(_json.dumps({{"type": "waiting_for_input", "prompt": str(prompt), "n": _forge_input_counter}}), flush=True)
+    # Block until orchestrator writes a JSON line to our stdin
+    _line = _sys.stdin.readline()
+    try:
+        _data = _json.loads(_line.strip())
+        return _data.get("content", "")
+    except Exception:
+        return _line.strip()
+
+_builtins.input = _forge_input
+
+# ─── user script ────────────────────────────────────────────────────────────
+{user_source}
+"""
+
+# How long to wait for user input before timing out (seconds)
+_STDIN_POLL_TIMEOUT = 120
+_STDIN_POLL_INTERVAL = 0.8  # poll every 800 ms
+
+
+class ForgeExecuteRequest(BaseModel):
+    source: str = Field(..., min_length=1, max_length=32_000)
+    language: str = Field(default="python")
+    user_id: str = Field(..., min_length=1)
+    session_id: str = Field(..., min_length=8, max_length=128)
+
+
+async def _poll_terminal_input(session_id: str, timeout: float) -> Optional[str]:
+    """
+    Poll the terminal_inputs table for a row matching session_id with consumed=false.
+    Returns the content string when found, or None on timeout.
+    Marks the row consumed=true before returning.
+    """
+    admin = _get_supabase_admin()
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            result = await asyncio.to_thread(
+                lambda: admin.table("terminal_inputs")
+                .select("id, content")
+                .eq("session_id", session_id)
+                .eq("consumed", False)
+                .order("created_at", desc=False)
+                .limit(1)
+                .execute()
+            )
+            rows = result.data or []
+            if rows:
+                row = rows[0]
+                row_id = row["id"]
+                content = row.get("content", "")
+                # Mark consumed
+                await asyncio.to_thread(
+                    lambda: admin.table("terminal_inputs")
+                    .update({"consumed": True})
+                    .eq("id", row_id)
+                    .execute()
+                )
+                return content
+        except Exception as e:
+            log.warning("[forge/execute] terminal_inputs poll error: %s", e)
+        await asyncio.sleep(_STDIN_POLL_INTERVAL)
+    return None  # timeout
+
+
+@app.post(
+    "/forge/execute",
+    dependencies=[Depends(_require_internal_secret)],
+)
+async def forge_execute(req_body: ForgeExecuteRequest) -> JSONResponse:
+    """
+    Execute user Python in a sandboxed subprocess.
+
+    Returns a StreamingResponse of JSONL events.
+    The monkey-patched input() emits {"type": "waiting_for_input"} and then
+    blocks until this endpoint polls terminal_inputs and writes the response
+    to the subprocess stdin pipe.
+    """
+    from fastapi.responses import StreamingResponse as _StreamingResponse
+
+    session_id = req_body.session_id
+    source = req_body.source
+    language = req_body.language.lower()
+
+    if language not in ("python", "python3"):
+        return JSONResponse(
+            {"type": "error", "message": f"Language '{language}' not supported. Use Python."},
+            status_code=400,
+        )
+
+    # Wrap the script to intercept input() calls
+    wrapped_source = _FORGE_SCRIPT_WRAPPER.format(user_source=source)
+
+    # Write to a temp file to avoid shell-injection
+    import tempfile
+    tmp_file = tempfile.NamedTemporaryFile(
+        suffix=".py", delete=False, mode="w", encoding="utf-8"
+    )
+    tmp_file.write(wrapped_source)
+    tmp_file.close()
+    tmp_path = tmp_file.name
+
+    async def _event_stream():
+        import os as _os
+
+        yield json.dumps({"type": "start", "session_id": session_id}) + "\n"
+
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "python3", tmp_path,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={**_os.environ, "PYTHONUNBUFFERED": "1"},
+            )
+
+            # Track the process so /forge/kill can terminate it
+            _FORGE_SESSIONS[session_id] = proc
+
+            # ── Stdout reader + STDIN gate loop ──────────────────────────
+            async def _read_stderr() -> None:
+                """Drain stderr concurrently."""
+                assert proc.stderr is not None  # type: ignore[union-attr]
+                async for raw in proc.stderr:
+                    line = raw.decode("utf-8", errors="replace").rstrip()
+                    if line:
+                        _stderr_lines.append(line)
+
+            _stderr_lines: list[str] = []
+            stderr_task = asyncio.create_task(_read_stderr())
+
+            assert proc.stdout is not None  # type: ignore[union-attr]
+            assert proc.stdin is not None   # type: ignore[union-attr]
+
+            async for raw_line in proc.stdout:
+                line = raw_line.decode("utf-8", errors="replace").rstrip()
+                if not line:
+                    continue
+
+                # Try to parse as JSONL event (from our wrapper)
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    event = {"type": "stdout", "line": line}
+
+                if event.get("type") == "waiting_for_input":
+                    # Emit the gate event first so the browser shows the STDIN bar
+                    yield json.dumps(event) + "\n"
+
+                    # Poll Supabase until user supplies input or timeout
+                    user_content = await _poll_terminal_input(session_id, _STDIN_POLL_TIMEOUT)
+
+                    if user_content is None:
+                        # Timeout — write empty string so the script doesn't hang
+                        user_content = ""
+                        log.warning("[forge/execute:%s] STDIN timeout — sending empty string", session_id[:8])
+
+                    # Write the user's input back to the subprocess stdin
+                    try:
+                        proc.stdin.write(
+                            (json.dumps({"content": user_content}) + "\n").encode("utf-8")
+                        )
+                        await proc.stdin.drain()
+                    except Exception as e:
+                        log.warning("[forge/execute:%s] stdin write error: %s", session_id[:8], e)
+                else:
+                    yield json.dumps(event) + "\n"
+
+            # Collect any remaining stderr lines
+            await stderr_task
+            for err_line in _stderr_lines:
+                yield json.dumps({"type": "stderr", "line": err_line}) + "\n"
+
+            # Wait for process exit
+            rc = await proc.wait()
+            if rc == -9:
+                yield json.dumps({"type": "killed"}) + "\n"
+            else:
+                yield json.dumps({"type": "done", "exit_code": rc}) + "\n"
+
+        except asyncio.CancelledError:
+            if proc and proc.returncode is None:
+                proc.kill()
+            yield json.dumps({"type": "killed"}) + "\n"
+        except Exception as e:
+            log.exception("[forge/execute:%s] error: %s", session_id[:8], e)
+            yield json.dumps({"type": "error", "message": str(e)[:500]}) + "\n"
+        finally:
+            _FORGE_SESSIONS.pop(session_id, None)
+            try:
+                _os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    return _StreamingResponse(
+        _event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
+# ── Forge kill endpoint ───────────────────────────────────────────────────────
+# Tracks running forge subprocesses by session_id for kill targeting.
+_FORGE_SESSIONS: Dict[str, Any] = {}
+
+
+class ForgeKillRequest(BaseModel):
+    session_id: str = Field(..., min_length=8, max_length=128)
+
+
+@app.post(
+    "/forge/kill",
+    dependencies=[Depends(_require_internal_secret)],
+)
+async def forge_kill(req_body: ForgeKillRequest) -> JSONResponse:
+    """Terminate a running forge script by session_id."""
+    proc = _FORGE_SESSIONS.get(req_body.session_id)
+    if not proc:
+        return JSONResponse({"ok": False, "error": "session not found"}, status_code=404)
+    try:
+        proc.kill()
+        return JSONResponse({"ok": True, "session_id": req_body.session_id})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import uvicorn  # type: ignore
+
+    uvicorn.run(
+        "agathon.orchestrator:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", "8080")),
+        log_level=log_level.lower(),
+    )
