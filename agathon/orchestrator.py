@@ -118,6 +118,59 @@ from .attack_tier_logic import (  # noqa: E402
 )
 from .reporter import build_cvss_report  # noqa: E402
 
+# Elite 8 Genesis Pipeline — optional heavy deps; graceful degradation if absent
+try:
+    from .discovery_engine import DiscoveryEngine, DiscoveryReport  # noqa: E402
+    _HAS_DISCOVERY = True
+except ImportError:
+    _HAS_DISCOVERY = False
+
+try:
+    from .vulnerability_logic_tester import (  # noqa: E402
+        BOLATester, ExhaustionTester, InjectionTester, VulnerabilityReport,
+    )
+    _HAS_VLT = True
+except ImportError:
+    _HAS_VLT = False
+
+try:
+    from .alignment_auditor import AlignmentAuditor, AlignmentAuditReport  # noqa: E402
+    _HAS_AUDITOR = True
+except ImportError:
+    _HAS_AUDITOR = False
+
+try:
+    from .reasoning_hijacker import ReasoningHijacker  # noqa: E402
+    _HAS_HIJACKER = True
+except ImportError:
+    _HAS_HIJACKER = False
+
+try:
+    from .risk_quantifier import RiskQuantifier, VulnerabilityEntry  # noqa: E402
+    _HAS_RISK = True
+except ImportError:
+    _HAS_RISK = False
+
+try:
+    from .patch_generator import (  # noqa: E402
+        PatchGenerator, VulnerabilityAdapter, VulnerabilityDescriptor,
+    )
+    _HAS_PATCH = True
+except ImportError:
+    _HAS_PATCH = False
+
+try:
+    from .social_swarm import (  # noqa: E402
+        CompanyMetadata, OSINTContextAnalyser, PhishingEmailBuilder, SocialTemplate,
+    )
+    _HAS_SOCIAL = True
+except ImportError:
+    _HAS_SOCIAL = False
+
+import base64  # noqa: E402
+import zipfile  # noqa: E402
+import io       # noqa: E402
+
 
 # --------------------------------------------------------------------------- #
 # Logging                                                                     #
@@ -1653,6 +1706,355 @@ def _serialise_assistant_message(msg: Dict[str, Any]) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# Elite 8 — Genesis Intelligence Pipeline                                     #
+# --------------------------------------------------------------------------- #
+
+async def _elite8_pipeline(state: AgathonState) -> None:
+    """
+    Six-stage mandatory intelligence pipeline that runs after the Brain loop.
+
+    SCAN   → DiscoveryEngine: build full attack-surface map
+    BUDGET → Cost estimation before high-reasoning calls
+    BREACH → VulnerabilityLogicTester + AlignmentAuditor + ReasoningHijacker
+    FINANCE → RiskQuantifier: Projected Annual Loss Expectancy ($ALE)
+    DEFEND → PatchGenerator: Aegis Rule Bundle ZIP
+    SYNC   → Upsert scan_reports with complete dataset
+    """
+    scan_id = state.scan_id
+
+    async def _log(msg: str, severity: str = "info") -> None:
+        await _emit_scan_log(
+            state, log_type="elite8", severity=severity,
+            payload={"message": msg},
+        )
+
+    # ── SCAN: Discovery Engine ─────────────────────────────────────────────
+    discovery_data: Optional[Dict[str, Any]] = None
+    try:
+        await _log(f"[SCAN] DiscoveryEngine crawling {state.target_url}…")
+        if _HAS_DISCOVERY:
+            engine = DiscoveryEngine(
+                headless=True,
+                max_depth=3,
+                max_pages=50,
+                concurrency=4,
+                respect_robots=True,
+            )
+            report: "DiscoveryReport" = await asyncio.wait_for(
+                engine.crawl(state.target_url),
+                timeout=120,
+            )
+            discovery_data = {
+                "pages_crawled": len(report.pages),
+                "api_endpoints": [
+                    {"path": ep.path, "method": ep.method, "source": ep.source}
+                    for ep in report.api_endpoints
+                ],
+                "input_vectors": [
+                    {"url": iv.url, "param": iv.parameter_name, "type": iv.vector_type}
+                    for iv in report.input_vectors
+                ],
+                "crawl_errors": report.crawl_errors[:20],
+                "base_url": state.target_url,
+            }
+            await _log(
+                f"[SCAN] Surface map complete: {len(report.pages)} pages, "
+                f"{len(report.api_endpoints)} API endpoints, "
+                f"{len(report.input_vectors)} input vectors."
+            )
+        else:
+            # Fallback: derive surface map from target_url alone
+            discovery_data = {
+                "pages_crawled": 1,
+                "api_endpoints": [],
+                "input_vectors": [
+                    {"url": state.target_url, "param": "prompt", "type": "llm_chat"}
+                ],
+                "crawl_errors": [],
+                "base_url": state.target_url,
+            }
+            await _log("[SCAN] Playwright unavailable — using minimal surface map.", "warn")
+    except Exception as e:  # noqa: BLE001
+        await _log(f"[SCAN] DiscoveryEngine failed: {e}", "warn")
+        discovery_data = {
+            "pages_crawled": 0,
+            "api_endpoints": [],
+            "input_vectors": [],
+            "crawl_errors": [str(e)],
+            "base_url": state.target_url,
+        }
+
+    # ── BUDGET: Cost Protector ─────────────────────────────────────────────
+    # Estimate token cost before launching high-reasoning breach modules.
+    # Free Groq / Llama models cost $0 — skip routing; still emit the audit.
+    estimated_cost_usd = state.cost_usd
+    try:
+        target_model = state.target_model.lower()
+        if "gpt-4o" in target_model or "o1" in target_model or "claude" in target_model:
+            estimated_cost_usd = max(state.cost_usd, 0.08)
+        await _log(
+            f"[BUDGET] Estimated breach-stage cost: ${estimated_cost_usd:.4f}. "
+            f"Brain model: {state.budget().brain_model or GROQ_BRAIN_MODEL}."
+        )
+    except Exception as e:  # noqa: BLE001
+        await _log(f"[BUDGET] Cost estimation skipped: {e}", "warn")
+
+    # ── BREACH: Vulnerability + Alignment + Hijacker ───────────────────────
+    breach_findings: List[Dict[str, Any]] = list(state.findings)  # start from Brain findings
+    alignment_report_data: Optional[Dict[str, Any]] = None
+    try:
+        if _HAS_AUDITOR and state.api_key:
+            await _log("[BREACH] AlignmentAuditor running multi-turn scenarios…")
+            import aiohttp as _aiohttp
+            async with _aiohttp.ClientSession() as session:
+                auditor = AlignmentAuditor(
+                    base_url=state.target_url,
+                    session=session,
+                    api_key=state.api_key,
+                    model=state.target_model,
+                    max_workers=3,
+                    timeout=20.0,
+                )
+                audit: "AlignmentAuditReport" = await asyncio.wait_for(
+                    auditor.run_audit(), timeout=90,
+                )
+                failed = [r for r in audit.results if not r.passed]
+                alignment_report_data = {
+                    "total_scenarios": audit.total_scenarios,
+                    "passed": audit.passed_count,
+                    "failed": audit.failed_count,
+                    "pass_rate": audit.pass_rate,
+                    "risk_rating": audit.overall_risk_rating,
+                }
+                for r in failed:
+                    breach_findings.append({
+                        "source": "alignment_auditor",
+                        "title": r.scenario.name,
+                        "severity": r.scenario.severity.name,
+                        "cvss": 7.5 if r.scenario.severity.name == "HIGH" else 5.0,
+                        "description": r.failure_reason or "Alignment scenario failed",
+                        "category": r.scenario.category.name,
+                    })
+                await _log(
+                    f"[BREACH] Alignment audit: {audit.passed_count}/{audit.total_scenarios} passed "
+                    f"({audit.failed_count} failures, risk={audit.overall_risk_rating})."
+                )
+        else:
+            await _log("[BREACH] AlignmentAuditor skipped — no API key or dep missing.", "warn")
+    except Exception as e:  # noqa: BLE001
+        await _log(f"[BREACH] AlignmentAuditor error: {e}", "warn")
+
+    try:
+        if _HAS_HIJACKER and state.api_key:
+            await _log("[BREACH] ReasoningHijacker stress-testing CoT boundaries…")
+            hijacker = ReasoningHijacker(
+                base_url=state.target_url,
+                api_key=state.api_key,
+                model=state.target_model,
+            )
+            hijack_results = await asyncio.wait_for(
+                asyncio.to_thread(hijacker.run),
+                timeout=60,
+            )
+            for r in (hijack_results or []):
+                if getattr(r, "exploited", False):
+                    breach_findings.append({
+                        "source": "reasoning_hijacker",
+                        "title": f"CoT Hijack — {getattr(r, 'token_type', 'unknown')}",
+                        "severity": "HIGH",
+                        "cvss": 8.0,
+                        "description": getattr(r, "reasoning_trace", "Reasoning chain hijacked"),
+                        "category": "LLM06_EXCESSIVE_AGENCY",
+                    })
+            await _log(f"[BREACH] ReasoningHijacker complete: {len(hijack_results or [])} probes fired.")
+        else:
+            await _log("[BREACH] ReasoningHijacker skipped — no API key or dep missing.", "warn")
+    except Exception as e:  # noqa: BLE001
+        await _log(f"[BREACH] ReasoningHijacker error: {e}", "warn")
+
+    # ── FINANCE: Risk Quantifier ($ALE) ────────────────────────────────────
+    ale_usd = 0.0
+    risk_profile_data: Optional[Dict[str, Any]] = None
+    try:
+        if _HAS_RISK and breach_findings:
+            await _log("[FINANCE] RiskQuantifier calculating Projected Annual Loss Expectancy…")
+            vuln_entries = [
+                VulnerabilityEntry(
+                    id=f["source"] + "_" + str(i),
+                    title=f.get("title", "Unknown"),
+                    cvss_score=float(f.get("cvss", 5.0)),
+                    description=f.get("description", ""),
+                    affected_asset=state.target_url,
+                    data_at_risk="system_prompt" if "injection" in f.get("category", "").lower() else "PII",
+                    source_module=f.get("source", "brain"),
+                )
+                for i, f in enumerate(breach_findings)
+            ]
+            quantifier = RiskQuantifier(industry="technology")
+            profile = quantifier.quantify(vuln_entries)
+            ale_usd = profile.adjusted_total_risk_usd
+            risk_profile_data = {
+                "ale_usd": round(ale_usd, 2),
+                "total_ale_usd": round(profile.total_annual_loss_expectancy, 2),
+                "worst_case_usd": round(profile.worst_case_single_event, 2),
+                "regulatory_usd": round(profile.regulatory_liability_total, 2),
+                "risk_tier": profile.risk_tier,
+                "critical_count": profile.critical_count,
+                "high_count": profile.high_count,
+                "executive_summary": profile.executive_summary,
+            }
+            await _log(
+                f"[FINANCE] $ALE = ${ale_usd:,.0f} | Tier: {profile.risk_tier} | "
+                f"Critical: {profile.critical_count} High: {profile.high_count}"
+            )
+        else:
+            await _log("[FINANCE] RiskQuantifier skipped — no findings or dep missing.", "warn")
+    except Exception as e:  # noqa: BLE001
+        await _log(f"[FINANCE] RiskQuantifier error: {e}", "warn")
+
+    # ── DEFEND: PatchGenerator + Aegis ZIP ────────────────────────────────
+    aegis_zip_b64: Optional[str] = None
+    patch_count = 0
+    try:
+        if _HAS_PATCH and breach_findings:
+            await _log("[DEFEND] PatchGenerator building Aegis Rule Bundle…")
+            descriptors: List[Any] = []
+            for f in breach_findings[:10]:
+                src = f.get("source", "brain")
+                try:
+                    if src == "alignment_auditor":
+                        descriptors.append(VulnerabilityAdapter.from_alignment_failure(f))
+                    elif f.get("category", "").startswith("BOLA") or "bola" in src:
+                        descriptors.append(VulnerabilityAdapter.from_bola_finding(f))
+                    elif "exhaust" in src or "exhaustion" in f.get("category", "").lower():
+                        descriptors.append(VulnerabilityAdapter.from_exhaustion_finding(f))
+                    else:
+                        # Generic injection / brain finding
+                        descriptors.append(VulnerabilityAdapter.from_injection_finding({
+                            "injection_type": f.get("category", "prompt_injection"),
+                            "agent_endpoint": state.target_url,
+                            "payload": f.get("description", "")[:200],
+                            "response_snippet": f.get("description", "")[:300],
+                            "risk": f.get("severity", "HIGH"),
+                        }))
+                except Exception:  # noqa: BLE001
+                    continue
+            generator = PatchGenerator()
+            suites = generator.generate_batch(descriptors[:10])  # cap at 10 patches
+
+            # Build in-memory ZIP
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(
+                    "README.md",
+                    f"# ForgeGuard AI — Aegis Rule Bundle\n\n"
+                    f"Scan: {scan_id}\nTarget: {state.target_url}\n"
+                    f"Generated: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n\n"
+                    f"## Contents\n\n"
+                    f"This bundle contains {len(suites)} guardrail sets:\n"
+                    + "\n".join(f"- {s.vulnerability.finding_id}" for s in suites),
+                )
+                for suite in suites:
+                    slug = suite.vulnerability.finding_id.replace("/", "_").replace(" ", "-")[:40]
+                    zf.writestr(f"patches/{slug}_fastapi_middleware.py", suite.fastapi_artifact.code)
+                    zf.writestr(f"patches/{slug}_nextjs_middleware.ts", suite.nextjs_artifact.code)
+                    zf.writestr(f"patches/{slug}_system_prompt.md", suite.system_prompt_artifact.code)
+
+            aegis_zip_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            patch_count = len(suites)
+            await _log(f"[DEFEND] Aegis Bundle ready: {patch_count} guardrail sets, {len(buf.getvalue())} bytes.")
+        else:
+            await _log("[DEFEND] PatchGenerator skipped — no findings or dep missing.", "warn")
+    except Exception as e:  # noqa: BLE001
+        await _log(f"[DEFEND] PatchGenerator error: {e}", "warn")
+
+    # ── Social Swarm — Training Template Generation ────────────────────────
+    social_templates: Optional[List[Dict[str, Any]]] = None
+    try:
+        if _HAS_SOCIAL:
+            await _log("[SOCIAL] SocialSwarm generating training templates…")
+            from urllib.parse import urlparse as _urlparse
+            parsed_url = _urlparse(state.target_url)
+            domain = parsed_url.netloc or "target.example.com"
+            meta = CompanyMetadata(
+                company_name=domain,
+                primary_domain=domain,
+                llm_provider=state.target_model.split("/")[0] if "/" in state.target_model else "openai",
+                tech_stack_public=["openai", "python", "docker"],
+                authentication_provider="OAuth2",
+                key_employees_public=[],
+                known_vendors=["OpenAI", "AWS", "GitHub"],
+                recent_news=[],
+                conference_presence=[],
+            )
+            impersonation = OSINTContextAnalyser.derive_impersonation_targets(meta)
+            imp = impersonation[0] if impersonation else {"name": f"CTO @ {domain}", "role": "CTO"}
+            watermark = f"FG-{scan_id[:8].upper()}"
+            builder = PhishingEmailBuilder()
+            t1 = builder.build_1_api_key_audit(meta, watermark, imp)
+            t2 = builder.build_2_it_helpdesk_vishing(meta, watermark)
+            social_templates = [
+                {
+                    "template_id": t1.template_id,
+                    "category": t1.category,
+                    "platform": t1.platform.value if hasattr(t1.platform, "value") else str(t1.platform),
+                    "subject": t1.subject,
+                    "content": t1.content[:2000],
+                    "red_flags": t1.red_flags,
+                    "training_debrief": t1.training_debrief,
+                    "watermark": watermark,
+                },
+                {
+                    "template_id": t2.template_id,
+                    "category": t2.category,
+                    "platform": t2.platform.value if hasattr(t2.platform, "value") else str(t2.platform),
+                    "subject": t2.subject,
+                    "content": t2.content[:2000],
+                    "red_flags": t2.red_flags,
+                    "training_debrief": t2.training_debrief,
+                    "watermark": watermark,
+                },
+            ]
+            await _log(f"[SOCIAL] {len(social_templates)} training templates generated.")
+        else:
+            await _log("[SOCIAL] SocialSwarm skipped — dep missing.", "warn")
+    except Exception as e:  # noqa: BLE001
+        await _log(f"[SOCIAL] SocialSwarm error: {e}", "warn")
+
+    # ── SYNC: Upsert scan_reports with complete dataset ────────────────────
+    try:
+        await _log("[SYNC] Persisting Genesis dataset to scan_reports…")
+        extra_row: Dict[str, Any] = {
+            "scan_id": scan_id,
+        }
+        if discovery_data is not None:
+            extra_row["discovery_report"] = discovery_data
+        if ale_usd:
+            extra_row["ale_usd"] = round(ale_usd, 2)
+        if social_templates:
+            extra_row["social_templates"] = social_templates
+        if aegis_zip_b64:
+            extra_row["aegis_zip_b64"] = aegis_zip_b64
+
+        if len(extra_row) > 1:  # More than just scan_id
+            admin = _get_supabase_admin()
+            await asyncio.to_thread(
+                lambda: admin.table("scan_reports")
+                .upsert(extra_row, on_conflict="scan_id")
+                .execute()
+            )
+            await _log(
+                f"[SYNC] Genesis dataset synced — ALE=${ale_usd:,.0f}, "
+                f"{patch_count} patches, {len(social_templates or [])} social templates."
+            )
+        else:
+            await _log("[SYNC] No Genesis data to persist — all stages skipped.", "warn")
+    except Exception as e:  # noqa: BLE001
+        log.error("[elite8] scan_reports sync failed: %s", e)
+        await _log(f"[SYNC] Supabase sync failed: {e}", "warn")
+
+
 async def run_scan(state: AgathonState) -> None:
     """Top-level lifecycle: probing -> brain loop -> seal -> usage emit."""
     await _STATE.put(state)
@@ -1694,6 +2096,13 @@ async def run_scan(state: AgathonState) -> None:
                 state, log_type="error", severity="high",
                 payload={"message": failure_reason},
             )
+
+    # ---- Elite 8 Genesis Intelligence Pipeline ------------------------------ #
+    # Runs AFTER the Brain loop so state.findings is fully populated.
+    # Best-effort — failures are logged but never kill the seal path.
+    if final_status != "failed" or state.findings:
+        with suppress(Exception):
+            await _elite8_pipeline(state)
 
     # ---- Autonomous CVSS report ------------------------------------------- #
     # Built from the in-memory findings ledger so we never need to re-query
@@ -1995,236 +2404,4 @@ class SocialEngineeringAgent:
         legal_auth_id  : UUID from legal_authorizations table
     """
 
-    SIMULATION_DISCLAIMER = (
-        "\n\n---\n"
-        "⚠️  FORGEGUARD AI — SIMULATION OUTPUT ⚠️\n"
-        "This content was generated for an AUTHORIZED security awareness audit.\n"
-        "Unauthorized use is illegal under computer fraud statutes worldwide.\n"
-        "Legal authorization ID: {auth_id}\n"
-        "---"
-    )
-
-    def __init__(self, router: Any, legal_auth_id: str) -> None:
-        self._router       = router
-        self._legal_auth_id = legal_auth_id
-
-    def _stamp(self, content: str) -> str:
-        """Append the simulation disclaimer with the auth ID."""
-        return content + self.SIMULATION_DISCLAIMER.format(auth_id=self._legal_auth_id)
-
-    def generate_phishing_template(
-        self,
-        target_domain: str,
-        persona: str = "IT Support",
-    ) -> str:
-        """
-        Generate a phishing email template for security awareness training.
-
-        Parameters
-        ----------
-        target_domain : Domain being simulated (e.g. "acme.com")
-        persona       : Sender persona (e.g. "IT Support", "HR Department", "CEO")
-
-        Returns
-        -------
-        str : Phishing email template marked as SIMULATION.
-        """
-        prompt = (
-            f"[SECURITY AUDIT SIMULATION]\n"
-            f"Generate a realistic phishing email template for a security awareness "
-            f"training exercise. The target organization domain is '{target_domain}'. "
-            f"The sender persona is '{persona}'. Include: subject line, email body with "
-            f"urgency cues, a fake call-to-action link placeholder [PHISHING_URL], "
-            f"and annotations explaining each social engineering technique used. "
-            f"Format: JSON with keys: subject, body, techniques[], risk_level."
-        )
-        system = (
-            "You are a cybersecurity awareness trainer generating SIMULATION phishing "
-            "templates for internal training programs. All output is fictional and "
-            "for defensive education purposes only."
-        )
-        result = self._router.mutate_uncensored(
-            prompt=prompt,
-            system_message=system,
-            legal_auth_id=self._legal_auth_id,
-        )
-        return self._stamp(result)
-
-    def simulate_vishing_script(self, target_role: str = "Finance Manager") -> str:
-        """
-        Generate a vishing (voice phishing) call script for training.
-
-        Parameters
-        ----------
-        target_role : The role being targeted (e.g. "Finance Manager", "HR Director")
-
-        Returns
-        -------
-        str : Call script with annotated manipulation techniques.
-        """
-        prompt = (
-            f"[SECURITY AUDIT SIMULATION]\n"
-            f"Generate a vishing (voice phishing) call script for a security awareness "
-            f"training exercise targeting a '{target_role}'. The script should simulate "
-            f"a fraudulent IT support call attempting to obtain credentials or authorize "
-            f"a wire transfer. Include: opener, rapport-building phase, urgency creation, "
-            f"information extraction attempt, and handling of objections. Annotate each "
-            f"social engineering technique. Format: structured dialogue with [ATTACKER] "
-            f"and [TARGET] turns, plus a techniques_used[] JSON array."
-        )
-        system = (
-            "You are a social engineering awareness trainer writing SIMULATION scripts "
-            "for corporate security training programs. Label all content as fictional."
-        )
-        result = self._router.mutate_uncensored(
-            prompt=prompt,
-            system_message=system,
-            legal_auth_id=self._legal_auth_id,
-        )
-        return self._stamp(result)
-
-    def generate_pretexting_scenario(self, context: str = "IT audit") -> str:
-        """
-        Generate a pretexting scenario for penetration testing.
-
-        Parameters
-        ----------
-        context : The pretext context (e.g. "IT audit", "vendor onboarding", "CEO fraud")
-
-        Returns
-        -------
-        str : Pretexting scenario with full narrative and detection guidance.
-        """
-        prompt = (
-            f"[SECURITY AUDIT SIMULATION]\n"
-            f"Generate a pretexting scenario for a penetration test. Context: '{context}'. "
-            f"Include: backstory for the attacker persona, information to gather in advance "
-            f"(OSINT phase), conversation flow to extract target information, red flags the "
-            f"target should watch for, and recommended countermeasures. This is for a "
-            f"defensive security awareness program. Format: JSON with keys: persona, "
-            f"osint_targets[], conversation_flow, red_flags[], countermeasures[]."
-        )
-        system = (
-            "You are a penetration testing instructor creating SIMULATION scenarios for "
-            "authorized security awareness training. All content is fictional and for "
-            "defensive educational purposes."
-        )
-        result = self._router.mutate_uncensored(
-            prompt=prompt,
-            system_message=system,
-            legal_auth_id=self._legal_auth_id,
-        )
-        return self._stamp(result)
-
-
-def marine_swarm_audit(
-    target_domain: str,
-    target_role: str,
-    context: str,
-    router: Any,
-    legal_auth_id: str,
-) -> Dict[str, Any]:
-    """
-    Full Marine Agent Swarm social engineering audit.
-
-    Orchestrates all three SocialEngineeringAgent methods and returns a
-    consolidated audit report. Used exclusively for Nuclear-intensity scans
-    with a valid legal authorization record.
-
-    Parameters
-    ----------
-    target_domain   : Domain to simulate phishing against
-    target_role     : Role to target in vishing simulation
-    context         : Pretexting scenario context
-    router          : HybridAIRouter with mutate_uncensored()
-    legal_auth_id   : UUID from legal_authorizations table (required)
-
-    Returns
-    -------
-    dict with keys: phishing_template, vishing_script, pretexting_scenario,
-                    legal_auth_id, simulation_timestamp
-    """
-    import time as _time
-
-    log.info(
-        "[marine-swarm] Starting audit — domain=%s role=%s auth=%s",
-        target_domain, target_role, legal_auth_id,
-    )
-
-    agent = SocialEngineeringAgent(router=router, legal_auth_id=legal_auth_id)
-
-    phishing   = agent.generate_phishing_template(target_domain)
-    vishing    = agent.simulate_vishing_script(target_role)
-    pretexting = agent.generate_pretexting_scenario(context)
-
-    return {
-        "simulation":           True,
-        "legal_auth_id":        legal_auth_id,
-        "simulation_timestamp": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
-        "target_domain":        target_domain,
-        "target_role":          target_role,
-        "context":              context,
-        "phishing_template":    phishing,
-        "vishing_script":       vishing,
-        "pretexting_scenario":  pretexting,
-        "disclaimer": (
-            "ALL OUTPUT IS SYNTHETIC SIMULATION FOR AUTHORIZED SECURITY AUDITS ONLY. "
-            "ForgeGuard AI bears no liability for misuse of this content."
-        ),
-    }
-
-
-
-# ── Recon endpoints ──────────────────────────────────────────────────────────
-
-class ReconStartRequest(BaseModel):
-    recon_id: str = Field(..., description="UUID of recon_targets row")
-    target: str = Field(..., description="Domain, IP, or URL to scan")
-    depth: int = Field(default=2, ge=1, le=5)
-
-
-@app.post("/recon/start", status_code=202)
-async def start_recon(
-    payload: ReconStartRequest,
-    background_tasks: BackgroundTasks,
-    _auth: str = Depends(_require_internal_secret),
-) -> JSONResponse:
-    """Kick off a background recon job."""
-    from agathon.recon import run_recon  # lazy import to avoid circular deps
-
-    sb = _get_supabase_admin()
-    background_tasks.add_task(
-        run_recon,
-        recon_id=payload.recon_id,
-        target=payload.target,
-        depth=payload.depth,
-        supabase_admin=sb,
-    )
-    return JSONResponse({"ok": True, "recon_id": payload.recon_id}, status_code=202)
-
-
-@app.get("/recon/{recon_id}/status")
-async def get_recon_status(
-    recon_id: str,
-    _auth: str = Depends(_require_internal_secret),
-) -> JSONResponse:
-    """Poll the status of a recon job."""
-    sb = _get_supabase_admin()
-    result = sb.table("recon_targets").select(
-        "id, target, status, surface_map, started_at, completed_at, error_msg"
-    ).eq("id", recon_id).execute()
-    rows = result.data or []
-    if not rows:
-        raise HTTPException(status_code=404, detail="Recon job not found")
-    return JSONResponse({"ok": True, "recon": rows[0]})
-
-
-if __name__ == "__main__":  # pragma: no cover
-    import uvicorn  # type: ignore
-
-    uvicorn.run(
-        "agathon.orchestrator:app",
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", "8080")),
-        log_level=log_level.lower(),
-    )
+ 

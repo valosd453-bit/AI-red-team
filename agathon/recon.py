@@ -9,6 +9,9 @@ Performs OSINT reconnaissance on a target domain/IP using:
   - Basic port scanning (common web ports)
   - Subdomain enumeration (wordlist-based)
   - Link/path enumeration via BeautifulSoup HTML parsing
+  - WebLogicAuditor: Playwright-powered deep diagnostic crawl
+    → Forms, XHR/fetch intercepts, tech stack fingerprinting,
+      auth indicators, external resource mapping
 
 Results are persisted to the `recon_targets` Supabase table and emitted
 as a `surface_map` JSON structure for the frontend tree graph.
@@ -27,12 +30,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import socket
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -56,7 +60,7 @@ except ImportError:
 
 # ── Playwright (optional, for JS-heavy targets) ───────────────────────────────
 try:
-    from playwright.async_api import async_playwright
+    from playwright.async_api import async_playwright, BrowserContext, Page, Request
     HAS_PLAYWRIGHT = True
 except ImportError:
     HAS_PLAYWRIGHT = False
@@ -71,6 +75,43 @@ COMMON_SUBDOMAINS = [
     "www", "mail", "ftp", "api", "dev", "staging", "admin", "blog",
     "app", "static", "cdn", "docs", "support", "m", "mobile",
     "login", "auth", "dashboard", "portal", "beta",
+]
+
+# ── Tech fingerprints (header / meta / script pattern → label) ───────────────
+_TECH_PATTERNS: List[Tuple[str, str]] = [
+    (r"next\.js|_next/", "Next.js"),
+    (r"nuxt|__nuxt", "Nuxt.js"),
+    (r"react|ReactDOM", "React"),
+    (r"vue\.js|__vue", "Vue.js"),
+    (r"angular\.min\.js|ng-version", "Angular"),
+    (r"svelte", "Svelte"),
+    (r"wordpress|wp-content|wp-json", "WordPress"),
+    (r"drupal", "Drupal"),
+    (r"shopify|myshopify", "Shopify"),
+    (r"fastapi|starlette", "FastAPI"),
+    (r"django", "Django"),
+    (r"rails|ruby on rails", "Rails"),
+    (r"laravel", "Laravel"),
+    (r"express\.js|express/", "Express.js"),
+    (r"graphql|/__graphql|/graphql", "GraphQL"),
+    (r"supabase", "Supabase"),
+    (r"firebase|firestore", "Firebase"),
+    (r"cloudflare", "Cloudflare"),
+    (r"vercel|\.vercel\.app", "Vercel"),
+    (r"netlify", "Netlify"),
+    (r"tailwind", "Tailwind CSS"),
+    (r"bootstrap", "Bootstrap"),
+    (r"jquery", "jQuery"),
+    (r"stripe\.com/v3", "Stripe"),
+    (r"recaptcha|hcaptcha", "CAPTCHA"),
+    (r"sentry", "Sentry"),
+    (r"segment\.com|analytics\.js", "Analytics"),
+]
+
+# ── Auth indicators (form field names / patterns) ────────────────────────────
+_AUTH_PATTERNS = [
+    "password", "passwd", "token", "api.?key", "secret", "auth", "credential",
+    "bearer", "jwt", "session", "csrf", "login", "signin", "register", "signup",
 ]
 
 
@@ -203,6 +244,376 @@ async def _subdomain_bruteforce(hostname: str) -> List[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# WebLogicAuditor — Playwright Diagnostic Crawl
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WebLogicAuditor:
+    """
+    Playwright-powered diagnostic crawl for deep web-application surface mapping.
+
+    Inspects the fully JS-rendered page and intercepts network traffic to extract:
+      - HTML forms (action URL, method, field names, auth indicators)
+      - API/XHR/fetch endpoints called during page load and interaction
+      - External resources (CDN scripts, fonts, analytics)
+      - Tech stack fingerprints (framework, backend, services)
+      - Auth indicators (login forms, token patterns, CSRF fields)
+      - Internal path enumeration (links found in rendered DOM)
+
+    Returns a dict with:
+      - ``forms``          — list of form metadata dicts
+      - ``api_calls``      — list of unique XHR/fetch URL strings
+      - ``external_scripts`` — list of external script src URLs
+      - ``tech_stack``     — list of detected technology strings
+      - ``auth_found``     — bool, True if auth-related indicators found
+      - ``internal_paths`` — list of internal href strings (≤ 30)
+      - ``nodes``          — list of SurfaceMap-compatible node dicts
+                             (append directly to surface_map["nodes"])
+
+    Usage::
+
+        auditor = WebLogicAuditor(url="https://example.com")
+        data = await auditor.audit()
+        surface_map["nodes"].extend(data["nodes"])
+        surface_map["root_children"].append("weblogic")
+    """
+
+    # Playwright launch args — Railway has no /dev/shm
+    _LAUNCH_ARGS = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--single-process",
+    ]
+
+    def __init__(
+        self,
+        url: str,
+        headless: bool = True,
+        timeout: int = 25000,
+        max_api_calls: int = 40,
+        max_paths: int = 30,
+    ) -> None:
+        self.url = url
+        self.headless = headless
+        self.timeout = timeout
+        self.max_api_calls = max_api_calls
+        self.max_paths = max_paths
+        self._origin = urlparse(url).scheme + "://" + (urlparse(url).hostname or "")
+
+    # ── Internal helpers ──────────────────────────────────────────────────
+
+    def _is_internal(self, url: str) -> bool:
+        return url.startswith(self._origin) or url.startswith("/")
+
+    def _is_api_like(self, url: str) -> bool:
+        """Heuristic: classify a request URL as an API/data call."""
+        lower = url.lower()
+        api_patterns = [
+            "/api/", "/graphql", "/v1/", "/v2/", "/v3/",
+            ".json", "format=json", "content-type=application",
+            "/rpc", "/rest/", "/data/", "/query",
+        ]
+        return any(p in lower for p in api_patterns)
+
+    def _detect_tech(self, content: str) -> List[str]:
+        """Fingerprint technologies from page source / network traffic."""
+        detected: List[str] = []
+        seen: set = set()
+        content_lower = content.lower()
+        for pattern, label in _TECH_PATTERNS:
+            if label not in seen and re.search(pattern, content_lower, re.IGNORECASE):
+                detected.append(label)
+                seen.add(label)
+        return detected
+
+    def _check_auth_indicators(self, content: str) -> bool:
+        """Return True if the page content has auth-related patterns."""
+        content_lower = content.lower()
+        return any(re.search(p, content_lower) for p in _AUTH_PATTERNS)
+
+    # ── Node builders ─────────────────────────────────────────────────────
+
+    def _build_nodes(
+        self,
+        forms: List[Dict[str, Any]],
+        api_calls: List[str],
+        external_scripts: List[str],
+        tech_stack: List[str],
+        auth_found: bool,
+        internal_paths: List[str],
+    ) -> List[Dict[str, Any]]:
+        """
+        Construct SurfaceNode-compatible dicts for the /dashboard/recon tree.
+        Structure mirrors the existing surface map format:
+          { id, label, type, children: [child_id, ...] }
+        """
+        nodes: List[Dict[str, Any]] = []
+
+        # ── Forms branch ─────────────────────────────────────────────────
+        form_children: List[str] = []
+        for i, form in enumerate(forms[:6]):
+            nid = f"form_{i}"
+            method = form.get("method", "GET").upper()
+            action = form.get("action", "/")[:40]
+            label = f"{method} {action}"
+            field_children: List[str] = []
+
+            # Form fields as leaf nodes
+            for j, field in enumerate(form.get("fields", [])[:5]):
+                fnid = f"form_{i}_field_{j}"
+                is_sensitive = any(
+                    re.search(p, field.get("name", ""), re.I) for p in _AUTH_PATTERNS
+                )
+                flabel = f"{'⚠ ' if is_sensitive else ''}{field.get('type','text')}: {field.get('name','')[:25]}"
+                nodes.append({
+                    "id": fnid,
+                    "label": flabel,
+                    "type": "auth_field" if is_sensitive else "record",
+                    "children": [],
+                })
+                field_children.append(fnid)
+
+            nodes.append({
+                "id": nid,
+                "label": label[:40],
+                "type": "form",
+                "children": field_children,
+            })
+            form_children.append(nid)
+
+        if form_children:
+            auth_icon = "⚠ " if auth_found else ""
+            nodes.append({
+                "id": "weblogic_forms",
+                "label": f"{auth_icon}Forms ({len(forms)})",
+                "type": "forms",
+                "children": form_children,
+            })
+
+        # ── API calls branch ──────────────────────────────────────────────
+        api_children: List[str] = []
+        for i, call_url in enumerate(api_calls[:12]):
+            nid = f"apicall_{i}"
+            parsed = urlparse(call_url)
+            label = (parsed.path or call_url)[:40]
+            nodes.append({"id": nid, "label": label, "type": "js_endpoint", "children": []})
+            api_children.append(nid)
+
+        if api_children:
+            nodes.append({
+                "id": "weblogic_api",
+                "label": f"API Calls ({len(api_calls)})",
+                "type": "js_endpoints",
+                "children": api_children,
+            })
+
+        # ── Tech stack branch ─────────────────────────────────────────────
+        tech_children: List[str] = []
+        for i, tech in enumerate(tech_stack[:10]):
+            nid = f"tech_{i}"
+            nodes.append({"id": nid, "label": tech, "type": "tech_item", "children": []})
+            tech_children.append(nid)
+
+        if tech_children:
+            nodes.append({
+                "id": "weblogic_tech",
+                "label": f"Tech Stack ({len(tech_stack)})",
+                "type": "tech",
+                "children": tech_children,
+            })
+
+        # ── External scripts branch ───────────────────────────────────────
+        ext_children: List[str] = []
+        for i, src in enumerate(external_scripts[:8]):
+            nid = f"ext_{i}"
+            parsed = urlparse(src)
+            label = (parsed.hostname or src)[:40]
+            nodes.append({"id": nid, "label": label, "type": "record", "children": []})
+            ext_children.append(nid)
+
+        if ext_children:
+            nodes.append({
+                "id": "weblogic_ext",
+                "label": f"External ({len(external_scripts)})",
+                "type": "external",
+                "children": ext_children,
+            })
+
+        # ── WebLogic root branch ──────────────────────────────────────────
+        wl_children: List[str] = []
+        if form_children:
+            wl_children.append("weblogic_forms")
+        if api_children:
+            wl_children.append("weblogic_api")
+        if tech_children:
+            wl_children.append("weblogic_tech")
+        if ext_children:
+            wl_children.append("weblogic_ext")
+
+        nodes.append({
+            "id": "weblogic",
+            "label": "App Logic Audit",
+            "type": "weblogic",
+            "children": wl_children,
+        })
+
+        return nodes
+
+    # ── Main entrypoint ───────────────────────────────────────────────────
+
+    async def audit(self) -> Dict[str, Any]:
+        """
+        Run the full Playwright diagnostic crawl.
+
+        Returns:
+            dict with keys:
+              forms, api_calls, external_scripts, tech_stack,
+              auth_found, internal_paths, nodes
+        """
+        if not HAS_PLAYWRIGHT:
+            log.warning("WebLogicAuditor: playwright unavailable — returning empty audit")
+            return {
+                "forms": [], "api_calls": [], "external_scripts": [],
+                "tech_stack": [], "auth_found": False, "internal_paths": [],
+                "nodes": [], "error": "playwright not installed",
+            }
+
+        forms: List[Dict[str, Any]] = []
+        api_calls: List[str] = []
+        external_scripts: List[str] = []
+        all_content_pieces: List[str] = []
+
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(
+                    headless=self.headless,
+                    args=self._LAUNCH_ARGS,
+                )
+                ctx: BrowserContext = await browser.new_context(
+                    user_agent="Mozilla/5.0 (ForgeGuard WebLogicAuditor/2.0) Gecko/20100101 Firefox/115.0",
+                    ignore_https_errors=True,
+                )
+
+                # ── Intercept network requests ────────────────────────────
+                intercepted_urls: set[str] = set()
+                ext_script_set: set[str] = set()
+
+                async def on_request(req: Request) -> None:
+                    req_url = req.url
+                    # XHR/fetch API calls
+                    if req.resource_type in ("xhr", "fetch") and len(api_calls) < self.max_api_calls:
+                        if req_url not in intercepted_urls:
+                            api_calls.append(req_url)
+                            intercepted_urls.add(req_url)
+                    # External scripts (different origin)
+                    if req.resource_type == "script" and not self._is_internal(req_url):
+                        ext_script_set.add(req_url)
+                    # Collect URL fragments for tech detection
+                    all_content_pieces.append(req_url)
+
+                page: Page = await ctx.new_page()
+                page.on("request", on_request)
+
+                # ── Navigate to target ────────────────────────────────────
+                log.info(f"[WebLogicAuditor] Navigating to {self.url}")
+                try:
+                    await page.goto(
+                        self.url,
+                        timeout=self.timeout,
+                        wait_until="networkidle",
+                    )
+                except Exception as nav_err:
+                    log.warning(f"[WebLogicAuditor] Navigation warning: {nav_err}")
+                    # Don't abort — partial results are still useful
+
+                # ── Extract page source for fingerprinting ────────────────
+                try:
+                    page_content = await page.content()
+                    all_content_pieces.append(page_content)
+                except Exception:
+                    page_content = ""
+
+                # ── Extract forms ─────────────────────────────────────────
+                try:
+                    raw_forms = await page.eval_on_selector_all(
+                        "form",
+                        """forms => forms.map(f => ({
+                            action: f.action || f.getAttribute('action') || '',
+                            method: f.method || f.getAttribute('method') || 'GET',
+                            fields: Array.from(f.querySelectorAll('input,select,textarea')).slice(0,10).map(el => ({
+                                type: el.type || el.tagName.toLowerCase(),
+                                name: el.name || el.id || '',
+                                placeholder: el.placeholder || '',
+                            }))
+                        }))""",
+                    )
+                    forms = raw_forms[:8]
+                except Exception as form_err:
+                    log.warning(f"[WebLogicAuditor] Form extraction error: {form_err}")
+
+                # ── Extract internal paths ────────────────────────────────
+                try:
+                    raw_links: List[str] = await page.eval_on_selector_all(
+                        "a[href]",
+                        "els => els.slice(0,60).map(e => e.href)",
+                    )
+                    internal_paths = list({
+                        u for u in raw_links
+                        if self._is_internal(u) and u != self.url and u != self._origin + "/"
+                    })[:self.max_paths]
+                except Exception:
+                    internal_paths = []
+
+                await browser.close()
+
+        except Exception as e:
+            log.exception(f"[WebLogicAuditor] Critical error: {e}")
+            return {
+                "forms": [], "api_calls": api_calls, "external_scripts": [],
+                "tech_stack": [], "auth_found": False, "internal_paths": [],
+                "nodes": [], "error": str(e)[:300],
+            }
+
+        # ── Post-process ──────────────────────────────────────────────────
+        combined_content = " ".join(all_content_pieces)
+        tech_stack = self._detect_tech(combined_content)
+        auth_found = self._check_auth_indicators(combined_content)
+
+        # Deduplicate and clean API calls — keep only API-like endpoints
+        api_calls_clean = list(dict.fromkeys(
+            u for u in api_calls if self._is_api_like(u)
+        ))[:self.max_api_calls]
+
+        external_scripts = sorted(ext_script_set)[:20]
+
+        # Build surface-map-compatible nodes
+        nodes = self._build_nodes(
+            forms=forms,
+            api_calls=api_calls_clean,
+            external_scripts=external_scripts,
+            tech_stack=tech_stack,
+            auth_found=auth_found,
+            internal_paths=internal_paths,
+        )
+
+        log.info(
+            f"[WebLogicAuditor] Done — {len(forms)} forms, {len(api_calls_clean)} API calls, "
+            f"{len(tech_stack)} tech, {len(external_scripts)} ext scripts"
+        )
+
+        return {
+            "forms": forms,
+            "api_calls": api_calls_clean,
+            "external_scripts": external_scripts,
+            "tech_stack": tech_stack,
+            "auth_found": auth_found,
+            "internal_paths": internal_paths,
+            "nodes": nodes,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Surface map builder
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -212,6 +623,7 @@ def _build_surface_map(
     banner: Dict[str, Any],
     open_ports: List[int],
     subdomains: List[str],
+    weblogic_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the tree-graph JSON for the frontend."""
     nodes = []
@@ -269,16 +681,30 @@ def _build_surface_map(
     if subdomains:
         root_children.append("subdomains")
 
+    # WebLogicAuditor nodes (depth >= 3)
+    if weblogic_data and weblogic_data.get("nodes"):
+        nodes.extend(weblogic_data["nodes"])
+        root_children.append("weblogic")
+
+    meta: Dict[str, Any] = {
+        "dns_records": len(dns_records),
+        "open_ports": open_ports,
+        "subdomains_found": len(subdomains),
+        "http_reachable": banner.get("reachable", False),
+    }
+    if weblogic_data:
+        meta["weblogic"] = {
+            "forms": len(weblogic_data.get("forms", [])),
+            "api_calls": len(weblogic_data.get("api_calls", [])),
+            "tech_stack": weblogic_data.get("tech_stack", []),
+            "auth_found": weblogic_data.get("auth_found", False),
+        }
+
     return {
         "root": hostname,
         "nodes": nodes,
         "root_children": root_children,
-        "meta": {
-            "dns_records": len(dns_records),
-            "open_ports": open_ports,
-            "subdomains_found": len(subdomains),
-            "http_reachable": banner.get("reachable", False),
-        },
+        "meta": meta,
     }
 
 
@@ -298,7 +724,7 @@ async def run_recon(
     Args:
         recon_id:       UUID of the recon_targets row
         target:         Domain, IP, or URL to scan
-        depth:          Scan depth (1=fast, 2=normal, 3=deep)
+        depth:          Scan depth (1=fast, 2=normal, 3=deep+WebLogicAuditor)
         supabase_admin: Admin Supabase client (bypasses RLS)
     """
     log.info(f"[recon:{recon_id[:8]}] Starting recon on {target!r} depth={depth}")
@@ -332,13 +758,20 @@ async def run_recon(
         if depth >= 2:
             subdomains = await _subdomain_bruteforce(hostname)
 
-        # Phase 4: Playwright deep fetch (depth >= 3)
+        # Phase 4: WebLogicAuditor deep crawl (depth >= 3)
+        weblogic_data: Optional[Dict[str, Any]] = None
         if depth >= 3 and HAS_PLAYWRIGHT:
-            playwright_data = await _playwright_fetch(base_url)
-            if playwright_data.get("links"):
-                banner["links"] = playwright_data["links"]
+            log.info(f"[recon:{recon_id[:8]}] Launching WebLogicAuditor on {base_url}")
+            auditor = WebLogicAuditor(url=base_url)
+            weblogic_data = await auditor.audit()
 
-        surface_map = _build_surface_map(hostname, dns_records, banner, open_ports, subdomains)
+            # Also merge Playwright-found links into banner for link_count
+            if weblogic_data.get("internal_paths"):
+                banner["links"] = weblogic_data["internal_paths"]
+
+        surface_map = _build_surface_map(
+            hostname, dns_records, banner, open_ports, subdomains, weblogic_data
+        )
 
         # Persist results
         supabase_admin.table("recon_targets").update({
@@ -351,6 +784,7 @@ async def run_recon(
             f"[recon:{recon_id[:8]}] Done — "
             f"{len(dns_records)} DNS types, {len(open_ports)} open ports, "
             f"{len(subdomains)} subdomains"
+            + (f", {len(weblogic_data.get('tech_stack', []))} tech detected" if weblogic_data else "")
         )
 
     except Exception as exc:
