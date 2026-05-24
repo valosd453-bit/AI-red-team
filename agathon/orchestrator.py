@@ -2041,7 +2041,7 @@ async def _elite8_pipeline(state: AgathonState) -> None:
         }
         if discovery_data is not None:
             extra_row["discovery_report"] = discovery_data
-        if ale_usd:
+        if ale_usd is not None:
             extra_row["ale_usd"] = round(ale_usd, 2)
         if social_templates:
             extra_row["social_templates"] = social_templates
