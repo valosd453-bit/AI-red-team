@@ -9,6 +9,7 @@ to. It hosts:
     GET   /scan/{scan_id}/state        -> snapshot of in-memory AgathonState
     POST  /scan/{scan_id}/escalation   -> operator approves/denies a greasy step
     WS    /ws/scan/{scan_id}           -> live event feed (mirrors scan_logs)
+    GET   /health                        -> dashboard handshake (INTERNAL_SCAN_TOKEN)
     GET   /healthz                     -> liveness probe
 
 The Brain loop is the heart of the service:
@@ -38,8 +39,9 @@ Compatibility with `Ai red/`:
     added to the bridge automatically appear in the Brain's catalogue.
 
 Env vars (all required in production unless noted):
-    AGATHON_INTERNAL_SECRET   shared with Vercel; used as bearer auth on
-                              every /scan/* request
+    INTERNAL_SCAN_TOKEN       primary shared secret with Vercel (Bearer auth)
+    AGATHON_INTERNAL_SECRET   legacy fallback for INTERNAL_SCAN_TOKEN
+                              on every /scan/* and /health request
     SUPABASE_URL              your Supabase project URL
     SUPABASE_SERVICE_ROLE_KEY service role — needed for cross-user writes
     GROQ_API_KEY              the Brain credential (https://console.groq.com)
@@ -254,23 +256,32 @@ def _get_supabase_admin():
 # --------------------------------------------------------------------------- #
 
 
-def _require_internal_secret(
-    authorization: Optional[str] = Header(default=None, alias="Authorization"),
-) -> None:
+def _resolve_internal_token() -> Optional[str]:
+    """Mirror ForgeGuard agathon-config: INTERNAL_SCAN_TOKEN primary."""
+    return os.environ.get("INTERNAL_SCAN_TOKEN") or os.environ.get(
+        "AGATHON_INTERNAL_SECRET"
+    )
+
+
+def _validate_bearer(authorization: Optional[str]) -> None:
     """Bearer-auth shared with Vercel. Constant-time compare."""
-    expected = os.environ.get("AGATHON_INTERNAL_SECRET")
+    expected = _resolve_internal_token()
     if not expected:
-        # Fail closed — refuse to run if the secret isn't configured.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AGATHON_INTERNAL_SECRET not configured on worker",
+            detail="INTERNAL_SCAN_TOKEN not configured on worker",
         )
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
     presented = authorization.split(" ", 1)[1].strip()
-    # Constant-time compare:
     if len(presented) != len(expected) or not _const_eq(presented, expected):
         raise HTTPException(status_code=401, detail="Bad bearer token")
+
+
+def _require_internal_secret(
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> None:
+    _validate_bearer(authorization)
 
 
 def _const_eq(a: str, b: str) -> bool:
@@ -2244,6 +2255,19 @@ class EscalationDecision(BaseModel):
 app = FastAPI(title="Agathon Orchestrator", version="0.2.0")
 
 
+@app.on_event("startup")
+async def _startup_checks() -> None:
+    if not _resolve_internal_token():
+        log.warning(
+            "INTERNAL_SCAN_TOKEN (or AGATHON_INTERNAL_SECRET) not set — "
+            "/health and /scan/* will reject requests"
+        )
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        log.warning(
+            "OPENROUTER_API_KEY not set — DeepSeek-V3 attack mutations may fail"
+        )
+
+
 @app.get("/healthz")
 async def healthz() -> Dict[str, Any]:
     snap = _STATE.all()
@@ -2252,6 +2276,19 @@ async def healthz() -> Dict[str, Any]:
         "brain_model": GROQ_BRAIN_MODEL,
         "active_scans": len(snap),
         "scan_ids": [s.scan_id for s in snap[:50]],
+    }
+
+
+@app.get("/health")
+async def health_check(
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> Any:
+    """Handshake probe used by the Vercel dashboard (/api/health/engine)."""
+    _validate_bearer(authorization)
+    return {
+        "status": "operational",
+        "version": "2.4.0",
+        "engine": "Agathon Sovereign",
     }
 
 
@@ -2342,7 +2379,7 @@ async def scan_state(scan_id: str) -> Dict[str, Any]:
 async def scan_ws(websocket: WebSocket, scan_id: str, token: str = "") -> None:
     """Live event feed. Auth via `?token=...` query param so browsers can
     connect (browser WebSocket can't set arbitrary headers)."""
-    expected = os.environ.get("AGATHON_INTERNAL_SECRET", "")
+    expected = _resolve_internal_token() or ""
     if not expected or not _const_eq(token, expected):
         await websocket.close(code=4401)
         return

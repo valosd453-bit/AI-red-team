@@ -519,7 +519,26 @@ class SovereignRouter:
     # ── Legacy aliases (backwards compat with swarm.py) ──────────────────
 
     def initial_check(self, prompt: str, system_context: str = "") -> str:
-        return self.scout(prompt, system_context or None, max_tokens=512)
+        """
+        Legacy health check wrapper for older callers.
+        Uses the Scout tier and catches OpenRouter/Groq timeout or rate-limit failures.
+        """
+        try:
+            return self.scout(prompt, system_context or None, max_tokens=512)
+        except LLMAPIError as exc:
+            cause = exc.__cause__
+            if isinstance(cause, requests.exceptions.Timeout):
+                logger.warning("[initial_check] OpenRouter/Groq timeout: %s", cause)
+                raise LLMAPIError("initial_check failed due to API timeout") from cause
+            if isinstance(cause, requests.exceptions.HTTPError):
+                status = getattr(cause.response, "status_code", None)
+                if status == 429:
+                    logger.warning("[initial_check] OpenRouter/Groq rate limited (429)")
+                    raise LLMAPIError("initial_check failed due to rate limit (429)") from cause
+            logger.warning("[initial_check] OpenRouter/Groq API error: %s", exc)
+            raise
+        finally:
+            logger.debug("[initial_check] completed for prompt length %d", len(prompt))
 
     def mutate(self, prompt: str, system_message: Optional[str] = None) -> str:
         return self.assassin(prompt, system_message)

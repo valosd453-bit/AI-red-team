@@ -1,5 +1,5 @@
 """
-ForgeGuard AI — Social Swarm (Social Engineering Simulation Generator)
+ForgeGuard AI - Social Swarm (Social Engineering Simulation Generator)
 ═══════════════════════════════════════════════════════════════════════════
 PURPOSE: Generates social-engineering templates for AUTHORISED security
          awareness training, red-team exercises, and internal purple-team
@@ -43,8 +43,8 @@ from uuid import uuid4
 
 class AuthorisationState(Enum):
     """Current authorisation state of the module."""
-    LOCKED     = auto()   # No token provided — module refuses to emit content
-    VALIDATED  = auto()   # Token accepted — module operational
+    LOCKED     = auto()   # No token provided - module refuses to emit content
+    VALIDATED  = auto()   # Token accepted - module operational
     EXPIRED    = auto()   # Token was valid but has timed out
     INVALID    = auto()   # Token failed verification
 
@@ -58,7 +58,7 @@ class EngagementToken:
     engagement_id: str
     organisation_id: str
     authorised_by: str           # Identity of the approving security lead
-    scope_of_work: str           # e.g. "Q3 2026 Internal Red Team — Developer Phishing"
+    scope_of_work: str           # e.g. "Q3 2026 Internal Red Team - Developer Phishing"
     target_domain: str           # The domain owned & verified via Target Verification Protocol
     issued_at: str               # ISO 8601
     expires_at: str              # ISO 8601
@@ -147,7 +147,7 @@ class AuthorisationGuard:
             if isinstance(result, str):
                 result = (
                     f"{'─'*72}\n"
-                    f"FORGEGUARD SOCIAL SWARM — AUTHORISED SIMULATION CONTENT\n"
+                    f"FORGEGUARD SOCIAL SWARM - AUTHORISED SIMULATION CONTENT\n"
                     f"Engagement: {self._current_token.engagement_id}\n"
                     f"Authorised by: {self._current_token.authorised_by}\n"
                     f"Target domain: {self._current_token.target_domain}\n"
@@ -197,7 +197,7 @@ class UrgencyLevel(Enum):
 class CompanyMetadata:
     """
     Target company metadata as produced by the OSINT Scout.
-    Populated via the Target Verification Protocol — the requesting
+    Populated via the Target Verification Protocol - the requesting
     organisation MUST have verified domain ownership.
     """
     # ── Verified identity ──
@@ -264,7 +264,7 @@ class OSINTContextAnalyser:
     """
     Analyses CompanyMetadata to identify plausible pretexts, impersonation
     targets, and contextual hooks that make social-engineering scenarios
-    believable — so the training is realistic and effective.
+    believable - so the training is realistic and effective.
     """
 
     @staticmethod
@@ -329,23 +329,23 @@ class OSINTContextAnalyser:
         # Conference season
         if meta.conference_presence:
             hooks.append(
-                f"Upcoming conference presence: {meta.conference_presence[0]} — "
+                f"Upcoming conference presence: {meta.conference_presence[0]} - "
                 f"attackers often target speakers/sponsors pre-conference"
             )
 
         # News-driven
         for news in meta.recent_news[:3]:
             if "funding" in news.lower() or "series" in news.lower():
-                hooks.append(f"Recent funding announcement ({news[:80]}...) — heightened targeting risk")
+                hooks.append(f"Recent funding announcement ({news[:80]}...) - heightened targeting risk")
             if "launch" in news.lower() or "release" in news.lower():
-                hooks.append(f"Recent product launch ({news[:80]}...) — support-team impersonation vector")
+                hooks.append(f"Recent product launch ({news[:80]}...) - support-team impersonation vector")
 
         # Default seasonal hooks
         month = now.month
         if month in (11, 12):
-            hooks.append("Holiday season — reduced staffing, increased phishing")
+            hooks.append("Holiday season - reduced staffing, increased phishing")
         if month in (6, 7, 8):
-            hooks.append("Summer vacation period — skeleton crew risk")
+            hooks.append("Summer vacation period - skeleton crew risk")
 
         return hooks
 
@@ -354,7 +354,7 @@ class OSINTContextAnalyser:
         """Build vendor-impersonation scenarios from known vendors."""
         pretexts: List[str] = []
         for vendor in meta.known_vendors[:5]:
-            pretexts.append(f"Security alert from {vendor} — urgent patch required")
+            pretexts.append(f"Security alert from {vendor} - urgent patch required")
         if not pretexts:
             pretexts.append("Cloud provider security notification")
         return pretexts
@@ -382,7 +382,7 @@ class PhishingEmailBuilder:
         content = textwrap.dedent(f"""\
         From: "{cto_name}" <cto@{domain}>
         To: engineering@{domain}
-        Subject: [URGENT] {provider} API Key Audit — Compliance Deadline Today
+        Subject: [URGENT] {provider} API Key Audit - Compliance Deadline Today
 
         Team,
 
@@ -401,19 +401,21 @@ class PhishingEmailBuilder:
             https://{domain}/api-key-registry
 
         2.  If any of your keys are missing, reply to this email with:
-            • The key prefix (first 8 characters only — never share full keys!)
+            • The key prefix (first 8 characters only - never share full keys!)
             • The project it's associated with
             • Monthly token usage estimate
 
         I'll reconcile everything tonight and send the report to Finance.
 
-        — {cto_name}
+        - {cto_name}
           Chief Technology Officer
           {meta.company_name}
 
         ---
         This email was sent via {meta.company_name} Internal Audit System.
-        Ref: AUD-{uuid4().hex[:8].upper# (Continuing from where your file cut off...)
+        Ref: AUD-{uuid4().hex[:8].upper()}
+        """)
+
         return SocialTemplate(
             template_id=f"PHISH-{uuid4().hex[:6]}",
             category="phishing_email",
@@ -438,14 +440,14 @@ class PhishingEmailBuilder:
         """Template 2: IT Helpdesk impersonation script (Vishing)."""
         content = textwrap.dedent(f"""
         [SIMULATED CALL SCRIPT]
-        AGENT: 'Hi, this is Mark from the Global IT Helpdesk. We’re seeing a persistent 
-               login loop on your {meta.authentication_provider} account that’s 
+        AGENT: 'Hi, this is Mark from the Global IT Helpdesk. We're seeing a persistent 
+               login loop on your {meta.authentication_provider} account that's 
                tripping our DDoS sensors.'
-        AGENT: 'I need to push a manual sync to your workstation. You’re about to 
+        AGENT: 'I need to push a manual sync to your workstation. You're about to 
                get a push notification on your phone. Can you go ahead and 
                approve that so we can clear the alert?'
         [IF TARGET ASKS FOR VERIFICATION]: 
-        AGENT: 'I can send you my employee ID, it’s IT-9928. We’re in a bit of a 
+        AGENT: 'I can send you my employee ID, it's IT-9928. We're in a bit of a 
                rush because this is affecting the {meta.company_name} production 
                deploy. Can you just hit approve on that MFA for me?'
         """)
