@@ -863,6 +863,7 @@ def _build_vulnerabilities(
             "remediation_mandate": remediation["mandate"],
             "poc": poc,
             "ts": f.get("ts"),
+            "ale_usd": f.get("ale_usd") or payload.get("ale_usd"),
         }
         vulns.append(vuln)
 

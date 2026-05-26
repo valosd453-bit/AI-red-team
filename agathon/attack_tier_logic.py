@@ -75,9 +75,15 @@ FAMILY_LOGIC_JAILBREAK = "logic_jailbreak"
 FAMILY_AUTONOMOUS_ADVERSARY = "autonomous_adversary"
 FAMILY_CUSTOM_TOOL = "custom_tool"          # Brain-authored payloads (sandboxed)
 FAMILY_RCE_SIMULATION = "rce_simulation"    # tool-calling-agent RCE proofs
+FAMILY_GARAK_PROMPT = "garak_prompt_injection"
+FAMILY_GARAK_JAILBREAK = "garak_jailbreak"
+FAMILY_GARAK_PII = "garak_pii_leak"
+FAMILY_GARAK_HALLUCINATION = "garak_hallucination"
 
 EASY_FAMILIES: FrozenSet[str] = frozenset(
     {
+        FAMILY_GARAK_PROMPT,
+        FAMILY_GARAK_HALLUCINATION,
         FAMILY_PROMPT_INJECTION,
         FAMILY_DATA_EXFILTRATION,
         FAMILY_CONTEXT_MANIPULATION,
@@ -87,6 +93,8 @@ EASY_FAMILIES: FrozenSet[str] = frozenset(
 
 MEDIUM_FAMILIES: FrozenSet[str] = frozenset(
     {
+        FAMILY_GARAK_JAILBREAK,
+        FAMILY_GARAK_PII,
         FAMILY_MODEL_MISUSE,
         FAMILY_TOKEN_SMUGGLING,
         FAMILY_EMOTIONAL_MANIPULATION,

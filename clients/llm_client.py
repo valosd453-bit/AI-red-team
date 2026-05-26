@@ -30,6 +30,7 @@ from __future__ import annotations
 import abc
 import logging
 import os
+import random
 import re
 import time
 import requests
@@ -151,20 +152,70 @@ def _openai_compat_call(
         "max_tokens": max_tokens,
     }
 
-    try:
-        resp = requests.post(endpoint, headers=headers, json=payload, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        choices = data.get("choices") or []
-        if not choices:
-            raise LLMAPIError(f"No choices in response from {endpoint}: {data}")
-        content = choices[0].get("message", {}).get("content", "")
-        # Strip DeepSeek-R1 chain-of-thought tags
-        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-        COST.record(model, len(prompt))
-        return content
-    except requests.exceptions.RequestException as exc:
-        raise LLMAPIError(f"Request to {endpoint} failed: {exc}") from exc
+    max_attempts = 5
+    base_delay = 2.0
+    cap_delay = 60.0
+    last_exc: Optional[Exception] = None
+
+    for attempt in range(max_attempts):
+        try:
+            resp = requests.post(endpoint, headers=headers, json=payload, timeout=timeout)
+            if resp.status_code in (429, 503) and attempt < max_attempts - 1:
+                delay = min(cap_delay, base_delay * (2 ** attempt))
+                delay += random.uniform(0, delay * 0.2)
+                logger.warning(
+                    "[llm] HTTP %s model=%s attempt %d/%d — backoff %.1fs",
+                    resp.status_code,
+                    model,
+                    attempt + 1,
+                    max_attempts,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            choices = data.get("choices") or []
+            if not choices:
+                raise LLMAPIError(f"No choices in response from {endpoint}: {data}")
+            content = choices[0].get("message", {}).get("content", "")
+            content = re.sub(
+                r"<think>.*?</think>",
+                "",
+                content,
+                flags=re.DOTALL,
+            ).strip()
+            COST.record(model, len(prompt))
+            return content
+        except requests.exceptions.HTTPError as exc:
+            last_exc = exc
+            status = getattr(exc.response, "status_code", None)
+            if status in (429, 503) and attempt < max_attempts - 1:
+                delay = min(cap_delay, base_delay * (2 ** attempt))
+                delay += random.uniform(0, delay * 0.2)
+                logger.warning(
+                    "[llm] HTTP %s model=%s attempt %d/%d — backoff %.1fs",
+                    status,
+                    model,
+                    attempt + 1,
+                    max_attempts,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
+            raise LLMAPIError(f"Request to {endpoint} failed: {exc}") from exc
+        except requests.exceptions.RequestException as exc:
+            last_exc = exc
+            if attempt < max_attempts - 1:
+                delay = min(cap_delay, base_delay * (2 ** attempt))
+                delay += random.uniform(0, delay * 0.2)
+                time.sleep(delay)
+                continue
+            raise LLMAPIError(f"Request to {endpoint} failed: {exc}") from exc
+
+    raise LLMAPIError(
+        f"Request to {endpoint} failed after {max_attempts} attempts: {last_exc}"
+    )
 
 
 # ─── OpenRouter client (Scout + Assassin + Judge + Uncensored) ────────────────
