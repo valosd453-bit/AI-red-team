@@ -1,146 +1,122 @@
-# AI-red-team
+---
+title: Agathon Engine
+emoji: 🛡️
+colorFrom: green
+colorTo: black
+sdk: docker
+app_port: 7860
+---
 
-An AI red-teaming framework for adversarial testing and security assessment of large language models.
+# Agathon Engine (AI-red-team)
 
-## Repository Status
+An AI red-teaming framework and FastAPI orchestrator for adversarial testing and security assessment of large language models. Powers ForgeGuard scan execution (kinetic strikes, Garak probes, Groq Brain).
 
-**Local Repository**: ✅ Initialized and committed  
-**Remote Configuration**: `https://github.com/kkdevil6/AI-red-team.git`  
-**Branch**: `main`  
-**Commit**: Initial commit with 62 files (Python cache excluded via .gitignore)
+## Hugging Face Spaces
+
+This repo ships a **Docker** Space configuration (port **7860**).
+
+| Item | Value |
+|------|--------|
+| SDK | `docker` |
+| App port | `7860` |
+| Entry | `uvicorn main:app` → [`agathon/orchestrator.py`](agathon/orchestrator.py) |
+
+### Required Space secrets
+
+| Variable | Purpose |
+|----------|---------|
+| `SUPABASE_URL` | Postgres / Realtime |
+| `SUPABASE_SERVICE_ROLE_KEY` | Engine writes `scan_logs` |
+| `INTERNAL_SCAN_TOKEN` or `AGATHON_INTERNAL_SECRET` | Bearer auth from ForgeGuard |
+| `GROQ_API_KEY` | Brain loop only |
+| `OPENROUTER_API_KEY` | Scout / Assassin / Judge |
+
+Optional: `DEEPSEEK_API_KEY`, `AGATHON_DOCKER_IMAGE`, `AGATHON_LOG_LEVEL`.
+
+### Health endpoints
+
+- `GET /healthz` — liveness (no auth)
+- `GET /health` — dashboard handshake (requires `Authorization: Bearer <INTERNAL_SCAN_TOKEN>`)
+
+ForgeGuard Vercel must set `PYTHON_ENGINE_URL` / `AGATHON_ORCHESTRATOR_URL` to your Space URL. The Next.js UI is **not** included in this image.
+
+### Local Docker smoke test
+
+```bash
+docker build -t agathon-hf .
+docker run -p 7860:7860 -e PORT=7860 agathon-hf
+curl http://localhost:7860/healthz
+```
 
 ## Project Structure
 
 ```
-ai-red-team/
-├── agathon/              # Main orchestration module
-│   ├── attack_tier_logic.py
-│   ├── orchestrator.py
+AI-red-team/
+├── agathon/              # FastAPI orchestrator + kinetic strike
+│   ├── orchestrator.py   # Production app (Railway / HF / Docker)
+│   ├── kinetic_strike.py
 │   └── reporter.py
-├── attacks/              # Attack implementations
-│   ├── adversarial_robustness.py
-│   ├── autonomous_adversary.py
-│   ├── base_tester.py
-│   ├── chain_of_thought_hijacking.py
-│   ├── context_manipulation.py
-│   ├── data_exfiltration.py
-│   ├── emotional_manipulation.py
-│   ├── invisible_command_injection.py
-│   ├── logic_jailbreak.py
-│   ├── model_misuse.py
-│   ├── prompt_injection.py
-│   ├── rag_poisoning.py
-│   ├── system_prompt_extraction.py
-│   ├── token_smuggling.py
-│   └── unit/              # Utility modules
-│       ├── logger.py
-│       ├── payload_manager.py
-│       ├── report_generator.py
-│       └── scoring_engine.py
-├── clients/              # LLM client implementations
-│   └── llm_client.py
-├── prompts/              # Attack prompt templates
-│   ├── exfiltration_templates.txt
-│   └── injection_templates.txt
-├── reports/              # Generated test reports
-├── utils/                # General utilities
-│   ├── logger.py
-│   └── payload_manager.py
-├── config.py             # Configuration settings
-├── main.py               # Main entry point
-├── run_redteam.py        # Red team runner script
-├── comprehensive_test.py  # Comprehensive test suite
-└── requirements-agathon.txt  # Python dependencies
+├── attacks/              # Attack implementations + Garak
+├── clients/              # LLM router (OpenRouter / Groq)
+├── main.py               # HF/Docker entry (exports `app`)
+├── cli.py                # CLI red-team runner
+├── Dockerfile            # Hugging Face Spaces image
+├── requirements.txt      # Unified deps (Playwright, Garak, FastAPI)
+├── run_redteam.py
+└── config.py
 ```
 
-## Setup Instructions
+## Setup (local development)
 
 ### Prerequisites
-- Python 3.10+
+
+- Python 3.11+
 - Virtual environment (recommended)
 
 ### Installation
 
-1. Clone the repository:
 ```bash
-git clone https://github.com/kkdevil6/AI-red-team.git
+git clone https://github.com/valoryan334-art/AI-red-team.git
 cd AI-red-team
-```
-
-2. Create and activate virtual environment:
-```bash
 python -m venv .venv
-.venv\Scripts\activate  # Windows
+source .venv/bin/activate   # or .venv\Scripts\activate on Windows
+pip install -r requirements.txt
+playwright install chromium
+```
+
+### Run the orchestrator (API)
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 7860
 # or
-source .venv/bin/activate  # macOS/Linux
+python -m agathon.orchestrator
 ```
 
-3. Install dependencies:
-```bash
-pip install -r requirements-agathon.txt
-```
-
-## Usage
-
-### Running the Red Team Framework
+### Run the CLI assessment
 
 ```bash
-python main.py
+python cli.py --model openai/gpt-oss-20b -m <model> ...
 ```
 
-### Running Specific Attack Tests
+### Other runners
 
 ```bash
 python run_redteam.py
-```
-
-### Comprehensive Testing
-
-```bash
 python comprehensive_test.py
 ```
 
 ## Attack Types
 
-- **Prompt Injection**: Direct prompt manipulation attacks
-- **Context Manipulation**: Altering model context and behavior
-- **System Prompt Extraction**: Extracting hidden system instructions
-- **Chain-of-Thought Hijacking**: Disrupting reasoning processes
-- **Token Smuggling**: Hidden token injection techniques
-- **Data Exfiltration**: Attempting unauthorized data extraction
-- **Logic Jailbreak**: Breaking logical constraints
-- **Emotional Manipulation**: Sentiment/emotion-based attacks
-- **Invisible Command Injection**: Non-visible command insertion
-- **Model Misuse**: General model abuse scenarios
-- **Adversarial Robustness**: Testing robustness against adversarial inputs
-- **Autonomous Adversary**: Self-directed attack patterns
-- **RAG Poisoning**: Retrieval-augmented generation attacks
+- Prompt Injection, Context Manipulation, System Prompt Extraction
+- Chain-of-Thought Hijacking, Token Smuggling, Data Exfiltration
+- Logic Jailbreak, Emotional Manipulation, Invisible Command Injection
+- Model Misuse, Adversarial Robustness, Autonomous Adversary, RAG Poisoning
+- Garak-aligned probes via `garak.*` catalogue entries
 
 ## Configuration
 
-Edit `config.py` to customize:
-- LLM endpoints and models
-- Attack parameters
-- Report output formats
-- Logging levels
-
-## Reports
-
-Test reports are generated in the `reports/` directory in both JSON and HTML formats.
-
-## Contributing
-
-Please ensure all code follows the project style guidelines and includes appropriate logging.
+Edit `config.py` or set environment variables for LLM endpoints, attack parameters, and logging.
 
 ## License
 
 [Specify your license here]
-
-## Contact
-
-For questions or issues, please contact the development team.
-
----
-
-**Last Updated**: April 26, 2026  
-**Status**: Code committed locally, awaiting GitHub push
