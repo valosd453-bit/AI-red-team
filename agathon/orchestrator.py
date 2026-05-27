@@ -121,6 +121,13 @@ from .attack_tier_logic import (  # noqa: E402
 from .reporter import build_cvss_report  # noqa: E402
 from .kinetic_strike import KINETIC_BATTERY, run_kinetic_strike  # noqa: E402
 from .supabase_sync import SupabaseSync, normalize_log_type  # noqa: E402
+from .target_client import (  # noqa: E402
+    AUTH_FAILURE_MESSAGE,
+    assert_target_key_isolation,
+    build_target_client,
+    is_auth_failure_response,
+    resolve_target_provider,
+)
 
 # Elite 8 Genesis Pipeline — optional heavy deps; graceful degradation if absent
 try:
@@ -580,6 +587,38 @@ async def _update_scan_row(
         )
     except Exception as e:  # noqa: BLE001
         log.error("scans update failed for %s: %s", state.scan_id, e)
+
+
+async def _handle_target_auth_failure(
+    state: AgathonState,
+    *,
+    detail: str = "",
+) -> None:
+    """Graceful 401 — seal scan, persist failure_reason, do not crash."""
+    state.sealed = True
+    state.seal_reason = AUTH_FAILURE_MESSAGE
+    payload = {
+        "message": AUTH_FAILURE_MESSAGE,
+        "detail": (detail or "")[:800],
+        "key_mask": OpenAICompatibleClient._mask_key(state.api_key),
+        "target_provider": state.target_provider or resolve_target_provider(
+            state.target_url, ""
+        ),
+    }
+    await _emit_scan_log(
+        state,
+        log_type="info",
+        severity="high",
+        attack_name="auth_failure",
+        payload=payload,
+    )
+    await _update_scan_row(
+        state,
+        status="failed",
+        progress_pct=100,
+        failure_reason=AUTH_FAILURE_MESSAGE,
+        completed_at=time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+    )
 
 
 async def _emit_brain_transcript(
@@ -1229,6 +1268,12 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
                 category=category,
                 rationale="mandatory kinetic battery",
             )
+            if (kinetic_result.payload or {}).get("auth_failure"):
+                await _handle_target_auth_failure(
+                    state,
+                    detail=str(kinetic_result.payload.get("response_excerpt", "")),
+                )
+                return
             await _apply_kinetic_result(
                 state,
                 name=strike_name,
@@ -1236,6 +1281,9 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
                 rationale="mandatory kinetic battery",
                 result=kinetic_result,
             )
+        except ValueError as e:
+            await _handle_target_auth_failure(state, detail=str(e))
+            return
         except Exception as e:  # noqa: BLE001
             log.warning("[kinetic] battery strike %s failed: %s", strike_name, e)
             await _emit_scan_log(
@@ -1287,16 +1335,27 @@ async def _tool_run_attack(
             category=category,
             rationale=rationale,
         )
+        if (kinetic_result.payload or {}).get("auth_failure"):
+            await _handle_target_auth_failure(
+                state,
+                detail=str(kinetic_result.payload.get("response_excerpt", "")),
+            )
+            return {
+                "ok": False,
+                "error": AUTH_FAILURE_MESSAGE,
+                "auth_failure": True,
+            }
         if kinetic_result.success:
             return await _apply_kinetic_result(
                 state, name=name, entry=entry, rationale=rationale, result=kinetic_result
             )
 
         # Registry/Garak fallback when kinetic judge reports no breach
-        client = OpenAICompatibleClient(
+        client = build_target_client(
             base_url=state.target_url,
             api_key=state.api_key,
             model=state.target_model,
+            target_provider=state.target_provider,
         )
 
         def _run() -> Tuple[str, Dict[str, Any], Any]:
@@ -1327,6 +1386,9 @@ async def _tool_run_attack(
         return await _apply_kinetic_result(
             state, name=name, entry=entry, rationale=rationale, result=fallback
         )
+    except ValueError as e:
+        await _handle_target_auth_failure(state, detail=str(e))
+        return {"ok": False, "error": str(e), "auth_failure": True}
     except Exception as e:  # noqa: BLE001
         state.consecutive_failures += 1
         await _emit_scan_log(
@@ -1609,36 +1671,53 @@ def _parse_tool_arguments(raw: Any) -> Dict[str, Any]:
 async def _target_preflight(state: AgathonState) -> bool:
     """Liveness probe against the user-supplied target API key (Groq/OpenAI/etc)."""
 
+    try:
+        assert_target_key_isolation(
+            state.api_key,
+            target_url=state.target_url,
+            target_provider=state.target_provider,
+        )
+    except ValueError as e:
+        await _handle_target_auth_failure(state, detail=str(e))
+        return False
+
     def _probe() -> str:
-        client = OpenAICompatibleClient(
+        client = build_target_client(
             base_url=state.target_url,
             api_key=state.api_key,
             model=state.target_model,
+            target_provider=state.target_provider,
         )
         return client.generate_response("Reply with the single word: ok")
 
     await _emit_scan_log(
         state,
-        log_type="attempt",
+        log_type="strike",
         severity="info",
         attack_name="preflight",
         payload={
             "message": "Target liveness probe starting",
             "target_model": state.target_model,
-            "target_provider": state.target_provider or "auto",
+            "target_provider": state.target_provider or resolve_target_provider(
+                state.target_url, ""
+            ),
+            "key_mask": OpenAICompatibleClient._mask_key(state.api_key),
         },
     )
     probe = await asyncio.to_thread(_probe)
+    if is_auth_failure_response(probe):
+        await _handle_target_auth_failure(state, detail=probe[:800])
+        return False
     if probe.startswith("[transport-error]") or probe.startswith("[http-"):
         await _emit_scan_log(
             state,
-            log_type="error",
+            log_type="info",
             severity="high",
             attack_name="preflight",
             payload={
                 "message": "Target liveness probe failed — check API key, URL, and model id.",
                 "detail": probe[:800],
-                "hint": "Groq: https://api.groq.com/openai/v1 + model openai/gpt-oss-20b",
+                "hint": "OpenAI: https://api.openai.com/v1 + sk-… key. Groq: https://api.groq.com/openai/v1 + gsk_…",
             },
         )
         state.sealed = True
@@ -2391,7 +2470,11 @@ async def run_scan(state: AgathonState) -> None:
     try:
         if not await _target_preflight(state):
             final_status = "failed"
-            failure_reason = state.seal_reason or "preflight_failed"
+            failure_reason = (
+                state.seal_reason
+                if state.seal_reason == AUTH_FAILURE_MESSAGE
+                else (state.seal_reason or "preflight_failed")
+            )
         else:
             await _run_kinetic_battery(state)
             await _brain_loop(state)
@@ -2457,18 +2540,20 @@ async def run_scan(state: AgathonState) -> None:
     # Persist usage events (the source of truth for Stripe metering).
     await _record_usage_events(state)
 
-    await _update_scan_row(
-        state,
-        status=final_status,
-        progress_pct=100,
-        completed_at=time.strftime(
+    scan_patch: Dict[str, Any] = {
+        "status": final_status,
+        "progress_pct": 100,
+        "completed_at": time.strftime(
             "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()
         ),
-        compute_seconds_used=int(state.wall_seconds()),
-        brain_input_tokens_used=state.brain_input_tokens,
-        brain_output_tokens_used=state.brain_output_tokens,
-        custom_tools_count=state.custom_tools_run,
-    )
+        "compute_seconds_used": int(state.wall_seconds()),
+        "brain_input_tokens_used": state.brain_input_tokens,
+        "brain_output_tokens_used": state.brain_output_tokens,
+        "custom_tools_count": state.custom_tools_run,
+    }
+    if failure_reason:
+        scan_patch["failure_reason"] = failure_reason
+    await _update_scan_row(state, **scan_patch)
     await _emit_scan_log(
         state, log_type="audit", severity="info",
         payload={
@@ -2609,9 +2694,16 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
 
     # SSRF guard — validate target URL before creating any state or tasks
     safe_url = _sanitize_target_url(req.target_url)
-    provider = (req.target_provider or "").strip()
-    if not provider and "groq.com" in safe_url.lower():
-        provider = "groq"
+    provider = resolve_target_provider(safe_url, (req.target_provider or "").strip())
+
+    try:
+        assert_target_key_isolation(
+            req.api_key,
+            target_url=safe_url,
+            target_provider=provider,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     state = AgathonState(
         scan_id=req.scan_id,

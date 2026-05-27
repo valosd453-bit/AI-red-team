@@ -6,6 +6,7 @@
 
 # --- Core toolkit (used by attacks/*.py + forgeguard_bridge.py) ------------
 requests>=2.31,<3.0
+httpx>=0.27,<0.29
 openai>=1.12,<2.0
 python-dotenv>=1.0,<2.0
 tenacity>=8.2,<9.0

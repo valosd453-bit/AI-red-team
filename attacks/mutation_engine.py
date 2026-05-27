@@ -460,7 +460,8 @@ class MutationEngineTester(BaseTester):
         self.max_rounds = max_rounds
         self.mutator_model = mutator_model
         # Groq API key for the summarisation gate (Llama-3-8B)
-        self.groq_api_key = groq_api_key or os.environ.get("GROQ_API_KEY", "")
+        # Brain-only summarisation — never used for target HTTP (self.client).
+        self.groq_api_key = (groq_api_key or "").strip()
         self._lang = random.choice(list(_LANG_TABLE.keys()))
 
     # ------------------------------------------------------------------ #

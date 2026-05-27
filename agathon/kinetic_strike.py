@@ -15,6 +15,12 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from forgeguard_bridge import OpenAICompatibleClient
 
+from .target_client import (
+    AUTH_FAILURE_MESSAGE,
+    build_target_client,
+    is_auth_failure_response,
+)
+
 if TYPE_CHECKING:
     from .orchestrator import AgathonState
 
@@ -72,14 +78,16 @@ class TargetStrikeClient:
         base_url: str,
         api_key: str,
         model: str,
+        target_provider: str = "",
         timeout: float = 30.0,
         max_tokens: int = 512,
     ) -> None:
-        self._api_key = api_key
-        self._client = OpenAICompatibleClient(
+        self._api_key = api_key.strip()
+        self._client = build_target_client(
             base_url=base_url,
-            api_key=api_key,
+            api_key=self._api_key,
             model=model,
+            target_provider=target_provider,
             timeout=timeout,
             max_tokens=max_tokens,
         )
@@ -273,6 +281,24 @@ async def run_kinetic_strike(
     )
     if _HAS_ROUTER and state.ale_judge_calls < _MAX_JUDGE_CALLS:
         state.ale_judge_calls += 1
+
+    if is_auth_failure_response(strike.response):
+        return KineticStrikeResult(
+            strike_name=strike_name,
+            category=category,
+            success=False,
+            severity="high",
+            payload={
+                "success": False,
+                "auth_failure": True,
+                "message": AUTH_FAILURE_MESSAGE,
+                "strike_name": strike_name,
+                "kinetic_telemetry": strike.telemetry,
+                "response_excerpt": (strike.response or "")[:500],
+            },
+            summary=AUTH_FAILURE_MESSAGE,
+            rationale=rationale,
+        )
 
     success = bool(verdict.get("breach")) and strike.ok
     severity = str(verdict.get("severity", "info"))

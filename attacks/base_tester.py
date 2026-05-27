@@ -5,6 +5,10 @@ Base module for AI Red Teaming Toolkit.
 Provides standardized interfaces and dataclasses for all attack modules.
 All attacks inherit from BaseTester and return AttackResult objects.
 
+Target HTTP: callers MUST pass an OpenAI-compatible client constructed with
+the scan-form API key (agathon.target_client.build_target_client). Do NOT
+default to os.environ GROQ_API_KEY / OPENROUTER_API_KEY for target strikes.
+
 This ensures:
 - Consistency across all attack types
 - Easy integration with scoring_engine.py and report_generator.py

@@ -252,6 +252,11 @@ class OpenAICompatibleClient:
                     self.base_url,
                     self._mask_key(self.api_key),
                 )
+                if r.status_code == 401:
+                    log.error(
+                        "[target] 401 auth rejected — using UI scan key %s (not engine GROQ)",
+                        self._mask_key(self.api_key),
+                    )
                 return f"[http-{r.status_code}] {json.dumps(err)[:500]}"
 
             try:
@@ -586,9 +591,17 @@ def _mutation_loop(
     Model routing:
       RECON / STANDARD (Free / Startup)  → DeepSeek-V3  (deepseek-chat)
       AGGRESSIVE / GREASY (Enterprise)   → DeepSeek-R1  (deepseek-reasoner)
+
+    `client` must be the UI target client — never GROQ_API_KEY unless the
+    target URL is Groq. Groq key below is Brain-only summarisation gate.
     """
     mutator = mutator_model_for(intensity) if intensity is not None else "deepseek-chat"
-    tester = MutationEngineTester(client, mutator_model=mutator)
+    brain_groq = os.environ.get("GROQ_API_KEY", "").strip() or None
+    tester = MutationEngineTester(
+        client,
+        mutator_model=mutator,
+        groq_api_key=brain_groq,
+    )
     return tester.run_attack(model)
 
 
