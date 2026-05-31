@@ -26,5 +26,8 @@ supabase>=2.10,<3.0
 websockets>=13.0,<14.0
 aiohttp>=3.9,<4.0
 
-# Global attack libraries (Garak probe catalogue)
+# Global attack libraries (Garak probe catalogue — 450+ probes via garak_catalog)
 garak>=0.9.0,<0.11.0
+
+# Phase 2: PyRIT intent-drift / tool-call injection (adapter not wired in Phase 1)
+# pyrit>=0.9.0

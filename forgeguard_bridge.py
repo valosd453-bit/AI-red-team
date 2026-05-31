@@ -628,6 +628,23 @@ def _garak_hallucination(client: Any, model: str) -> AttackResult:
     return run_garak_category(client, model, "hallucination")
 
 
+def _extend_registry_with_garak_heavy(base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Append dynamically discovered Garak probes (450+ when garak is installed)."""
+    try:
+        from agathon.garak_catalog import build_garak_registry_entries
+        from agathon.garak_runner import run_garak_probe
+
+        dynamic = build_garak_registry_entries(run_garak_probe)
+        existing = {e["name"] for e in base}
+        for entry in dynamic:
+            if entry["name"] not in existing:
+                base.append(entry)
+        log.info("[registry] Garak heavy arsenal: %d dynamic probes", len(dynamic))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[registry] Garak catalogue extension skipped: %s", exc)
+    return base
+
+
 REGISTRY: List[Dict[str, Any]] = [
     # -- Garak probe families (primary catalogue) --
     {
@@ -768,6 +785,8 @@ REGISTRY: List[Dict[str, Any]] = [
         "fn": _mutation_loop,
     },
 ]
+
+REGISTRY = _extend_registry_with_garak_heavy(REGISTRY)
 
 
 # --------------------------------------------------------------------------- #

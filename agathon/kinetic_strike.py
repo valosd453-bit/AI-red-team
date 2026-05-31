@@ -26,12 +26,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-KINETIC_BATTERY: List[tuple[str, str]] = [
-    ("garak.prompt_injection", "prompt_injection"),
-    ("garak.jailbreak", "jailbreak"),
-    ("garak.pii_leak", "pii_leak"),
-    ("garak.hallucination", "hallucination"),
-]
+def _load_kinetic_battery() -> List[tuple[str, str]]:
+    """Mandatory pre-Brain strikes — expanded Garak families when available."""
+    try:
+        from .garak_catalog import get_kinetic_battery_strikes
+
+        return get_kinetic_battery_strikes()
+    except Exception:  # noqa: BLE001
+        return [
+            ("garak.prompt_injection", "prompt_injection"),
+            ("garak.jailbreak", "jailbreak"),
+            ("garak.pii_leak", "pii_leak"),
+            ("garak.hallucination", "hallucination"),
+        ]
+
+
+KINETIC_BATTERY: List[tuple[str, str]] = _load_kinetic_battery()
 
 _MAX_JUDGE_CALLS = 20
 

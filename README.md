@@ -33,12 +33,24 @@ This repo ships a **Docker** Space configuration (port **7860**).
 
 Optional: `DEEPSEEK_API_KEY`, `AGATHON_DOCKER_IMAGE`, `AGATHON_LOG_LEVEL`.
 
+Optional webhook callback (engine → ForgeGuard):
+
+- `AGATHON_WEBHOOK_CALLBACK_URL` = `https://www.forgeguard-ai.com/api/v1/webhooks/agathon`
+- `AGATHON_WEBHOOK_SECRET` = same as ForgeGuard `AGATHON_WEBHOOK_SECRET` or `INTERNAL_SCAN_TOKEN`
+
 ### Health endpoints
 
 - `GET /healthz` — liveness (no auth)
 - `GET /health` — dashboard handshake (requires `Authorization: Bearer <INTERNAL_SCAN_TOKEN>`)
 
-ForgeGuard Vercel must set `PYTHON_ENGINE_URL` / `AGATHON_ORCHESTRATOR_URL` to your Space URL. The Next.js UI is **not** included in this image.
+**Canonical repository:** [github.com/valosd453-bit/AI-red-team](https://github.com/valosd453-bit/AI-red-team)
+
+ForgeGuard Vercel must set `PYTHON_ENGINE_URL` / `AGATHON_ORCHESTRATOR_URL` to your engine URL (Railway or Hugging Face Space under `valosd453-bit`). The Next.js UI is **not** included in this image.
+
+| Deploy target | Port |
+|---------------|------|
+| Hugging Face Spaces (Docker) | `7860` (`PORT` env optional) |
+| Railway | `$PORT` injected by platform |
 
 ### Local Docker smoke test
 
@@ -76,7 +88,7 @@ AI-red-team/
 ### Installation
 
 ```bash
-git clone https://github.com/valoryan334-art/AI-red-team.git
+git clone https://github.com/valosd453-bit/AI-red-team.git
 cd AI-red-team
 python -m venv .venv
 source .venv/bin/activate   # or .venv\Scripts\activate on Windows
@@ -111,7 +123,8 @@ python comprehensive_test.py
 - Chain-of-Thought Hijacking, Token Smuggling, Data Exfiltration
 - Logic Jailbreak, Emotional Manipulation, Invisible Command Injection
 - Model Misuse, Adversarial Robustness, Autonomous Adversary, RAG Poisoning
-- Garak-aligned probes via `garak.*` catalogue entries
+- Garak heavy arsenal: 450+ dynamic `garak.<module>.<Class>` catalogue entries when `garak` is installed
+- PyRIT adapter (Phase 2 — stub in requirements comment)
 
 ## Configuration
 

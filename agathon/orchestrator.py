@@ -1324,9 +1324,14 @@ async def _tool_run_attack(
         payload={"rationale": rationale, "message": "Kinetic strike initiated"},
     )
 
-    category = name.split(".")[-1] if "." in name else entry.get("family", name)
-    if category.startswith("garak_"):
-        category = category.replace("garak_", "")
+    if name.startswith("garak."):
+        from .garak_catalog import resolve_category_from_registry_name
+
+        category = resolve_category_from_registry_name(name)
+    else:
+        category = name.split(".")[-1] if "." in name else entry.get("family", name)
+        if category.startswith("garak_"):
+            category = category.replace("garak_", "")
 
     try:
         kinetic_result = await run_kinetic_strike(
@@ -2554,6 +2559,13 @@ async def run_scan(state: AgathonState) -> None:
     if failure_reason:
         scan_patch["failure_reason"] = failure_reason
     await _update_scan_row(state, **scan_patch)
+
+    with suppress(Exception):
+        await _notify_agathon_webhook(
+            state,
+            final_status=final_status,
+            failure_reason=failure_reason,
+        )
     await _emit_scan_log(
         state, log_type="audit", severity="info",
         payload={
@@ -2571,6 +2583,54 @@ async def run_scan(state: AgathonState) -> None:
     # Drop after a grace period so /scan/{id}/state still works briefly.
     await asyncio.sleep(60)
     await _STATE.drop(state.scan_id)
+
+
+async def _notify_agathon_webhook(
+    state: AgathonState,
+    *,
+    final_status: str,
+    failure_reason: Optional[str],
+) -> None:
+    """
+    Optional POST to ForgeGuard ``/api/v1/webhooks/agathon`` when a scan completes.
+
+    Set ``AGATHON_WEBHOOK_CALLBACK_URL`` (e.g. https://www.forgeguard-ai.com/api/v1/webhooks/agathon)
+    and ``AGATHON_WEBHOOK_SECRET`` on the engine.
+    """
+    callback = (os.environ.get("AGATHON_WEBHOOK_CALLBACK_URL") or "").strip()
+    secret = (
+        os.environ.get("AGATHON_WEBHOOK_SECRET")
+        or os.environ.get("INTERNAL_SCAN_TOKEN")
+        or os.environ.get("AGATHON_INTERNAL_SECRET")
+    )
+    if not callback or not secret:
+        return
+
+    import requests as _requests
+
+    payload = {
+        "kind": "scan.completed",
+        "scan_id": state.scan_id,
+        "payload": {
+            "status": final_status,
+            "failure_reason": failure_reason,
+            "attacks_run": state.attacks_run,
+            "wall_seconds": int(state.wall_seconds()),
+        },
+    }
+
+    def _post() -> None:
+        _requests.post(
+            callback,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {secret}",
+                "Content-Type": "application/json",
+            },
+            timeout=10,
+        )
+
+    await asyncio.to_thread(_post)
 
 
 async def _record_usage_events(state: AgathonState) -> None:
