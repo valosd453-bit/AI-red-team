@@ -81,15 +81,23 @@ def assert_target_key_isolation(
             "Use the API key for the target endpoint you entered in the scan form."
         )
 
+    if key.startswith("gsk_") and provider != "groq" and "groq.com" not in host:
+        raise ValueError(
+            "Groq API key (gsk_…) cannot be used against non-Groq target endpoints. "
+            "When targeting OpenAI, paste your OpenAI sk-… key from the scan form. "
+            "GROQ_API_KEY is reserved for the Agathon brain only."
+        )
+
     if provider == "openai" and key.startswith("gsk_"):
         raise ValueError(
             "Groq API key (gsk_…) cannot be used against OpenAI endpoints. "
             "Paste your OpenAI sk-… key in the scan form."
         )
 
-    if provider == "groq" and key.startswith("sk-") and not key.startswith("gsk_"):
-        log.warning(
-            "[target] OpenAI-style sk- key used against Groq host — may 401"
+    if (provider == "groq" or "groq.com" in host) and key.startswith("sk-") and not key.startswith("gsk_"):
+        raise ValueError(
+            "OpenAI API key (sk-…) cannot be used against Groq endpoints. "
+            "Paste your Groq gsk_… key in the scan form."
         )
 
 
