@@ -29,5 +29,5 @@ aiohttp>=3.9,<4.0
 # Global attack libraries (Garak probe catalogue — 450+ probes via garak_catalog)
 garak>=0.9.0,<0.11.0
 
-# Phase 2: PyRIT intent-drift / tool-call injection (adapter not wired in Phase 1)
+# PyRIT intent-drift scenarios (probes/pyrit_adapter.py — works without package via fallback)
 # pyrit>=0.9.0

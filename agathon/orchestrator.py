@@ -713,6 +713,8 @@ async def _emit_scan_report(
             + "\n".join(remediation_lines)
         )
 
+    from .supabase_sync import stringify_payload_numerics
+
     row = {
         "scan_id": state.scan_id,
         "generator_model": state.budget().brain_model or GROQ_BRAIN_MODEL,
@@ -720,8 +722,8 @@ async def _emit_scan_report(
         "audit_report_md": audit_md,
         "cvss_overall": float(report.get("overall_cvss", 0.0)),
         "risk_label": risk_label,
-        "findings": report.get("vulnerabilities", []),
-        "attack_path": attack_path,
+        "findings": stringify_payload_numerics(report.get("vulnerabilities", [])),
+        "attack_path": stringify_payload_numerics(attack_path),
         "optimization_suggestions_md": _build_optimization_md(report),
         "owasp_coverage": _build_owasp_coverage(report),
         "generation_input_tokens": state.brain_input_tokens,
@@ -2510,6 +2512,7 @@ async def run_scan(state: AgathonState) -> None:
     # Built from the in-memory findings ledger so we never need to re-query
     # Postgres. Emitted to scan_reports + a final scan_log row so the UI can
     # surface it without an extra fetch.
+    report: Optional[Dict[str, Any]] = None
     try:
         report = build_cvss_report(
             scan_id=state.scan_id,
@@ -2565,6 +2568,7 @@ async def run_scan(state: AgathonState) -> None:
             state,
             final_status=final_status,
             failure_reason=failure_reason,
+            report=report,
         )
     await _emit_scan_log(
         state, log_type="audit", severity="info",
@@ -2590,32 +2594,58 @@ async def _notify_agathon_webhook(
     *,
     final_status: str,
     failure_reason: Optional[str],
+    report: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
-    Optional POST to ForgeGuard ``/api/v1/webhooks/agathon`` when a scan completes.
+    POST to ForgeGuard ``/api/v1/webhooks/agathon`` when a scan reaches 100%.
 
-    Set ``AGATHON_WEBHOOK_CALLBACK_URL`` (e.g. https://www.forgeguard-ai.com/api/v1/webhooks/agathon)
-    and ``AGATHON_WEBHOOK_SECRET`` on the engine.
+    Sends technical report markdown and financial liability (ALE) when available.
+    Default callback: https://www.forgeguard-ai.com/api/v1/webhooks/agathon
     """
-    callback = (os.environ.get("AGATHON_WEBHOOK_CALLBACK_URL") or "").strip()
+    callback = (
+        os.environ.get("AGATHON_WEBHOOK_CALLBACK_URL")
+        or "https://www.forgeguard-ai.com/api/v1/webhooks/agathon"
+    ).strip()
     secret = (
         os.environ.get("AGATHON_WEBHOOK_SECRET")
         or os.environ.get("INTERNAL_SCAN_TOKEN")
         or os.environ.get("AGATHON_INTERNAL_SECRET")
     )
-    if not callback or not secret:
+    if not secret:
         return
 
     import requests as _requests
+
+    liability = sum(
+        float(f.get("financial_liability_usd") or f.get("ale_usd") or 0)
+        for f in state.findings
+    )
+    technical_md = ""
+    ale_usd: Optional[float] = None
+    if report:
+        technical_md = (
+            report.get("audit_report_md")
+            or report.get("executive_summary")
+            or ""
+        )
+        ale_usd = report.get("ale_usd") or report.get("financial_liability_usd")
+    if ale_usd is None and liability > 0:
+        ale_usd = round(liability, 2)
 
     payload = {
         "kind": "scan.completed",
         "scan_id": state.scan_id,
         "payload": {
             "status": final_status,
+            "progress_pct": 100,
             "failure_reason": failure_reason,
             "attacks_run": state.attacks_run,
             "wall_seconds": int(state.wall_seconds()),
+            "technical_report_md": technical_md,
+            "financial_liability_usd": str(ale_usd) if ale_usd is not None else None,
+            "ale_usd": str(ale_usd) if ale_usd is not None else None,
+            "overall_cvss": str(report.get("overall_cvss", 0)) if report else None,
+            "overall_severity": report.get("overall_severity") if report else None,
         },
     }
 

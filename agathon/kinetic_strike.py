@@ -20,6 +20,7 @@ from .target_client import (
     build_target_client,
     is_auth_failure_response,
 )
+from .strike_logic import strike_authorization_header
 
 if TYPE_CHECKING:
     from .orchestrator import AgathonState
@@ -110,11 +111,16 @@ class TargetStrikeClient:
 
     def fire(self, prompt: str) -> TargetStrikeResult:
         """POST target /v1/chat/completions with the operator Bearer token."""
+        auth_header = strike_authorization_header(
+            self._api_key,
+            getattr(self._client, "target_provider", ""),
+        )
         telemetry = {
             "kind": "kinetic_target_request",
             "url": self.url,
             "model": self.model,
             "key_mask": self.key_mask,
+            "authorization": auth_header.split(" ", 1)[0] + " [user-scan-key]",
         }
         logger.info(
             "[kinetic] target fire model=%s url=%s key=%s",

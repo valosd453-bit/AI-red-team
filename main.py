@@ -1,5 +1,5 @@
-"""Hugging Face / Docker entry — exposes FastAPI app for `uvicorn main:app`."""
+"""Hugging Face / Docker entry — exposes FastAPI app for ``uvicorn main:app``."""
 
-from agathon.orchestrator import app
+from api.app import app
 
 __all__ = ["app"]

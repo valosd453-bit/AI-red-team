@@ -786,7 +786,44 @@ REGISTRY: List[Dict[str, Any]] = [
     },
 ]
 
-REGISTRY = _extend_registry_with_garak_heavy(REGISTRY)
+def _make_pyrit_fn(registry_name: str, category: str) -> Callable[..., AttackResult]:
+    def _fn(client: Any, model: str) -> AttackResult:
+        from probes.pyrit_adapter import run_pyrit_probe
+
+        return run_pyrit_probe(
+            client,
+            registry_name=registry_name,
+            category=category,
+        )
+
+    return _fn
+
+
+def _extend_registry_with_pyrit(base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Register PyRIT intent-drift scenarios as primary strike cores."""
+    try:
+        from probes.pyrit_adapter import PYRIT_SCENARIOS
+
+        existing = {e["name"] for e in base}
+        for spec in PYRIT_SCENARIOS:
+            if spec["name"] in existing:
+                continue
+            base.append(
+                {
+                    "name": spec["name"],
+                    "family": f"garak_{spec['category']}",
+                    "level": "medium",
+                    "engine": "pyrit",
+                    "fn": _make_pyrit_fn(spec["name"], spec["category"]),
+                }
+            )
+        log.info("[registry] PyRIT scenarios: %d", len(PYRIT_SCENARIOS))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[registry] PyRIT extension skipped: %s", exc)
+    return base
+
+
+REGISTRY = _extend_registry_with_pyrit(_extend_registry_with_garak_heavy(REGISTRY))
 
 
 # --------------------------------------------------------------------------- #

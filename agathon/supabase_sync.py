@@ -31,6 +31,25 @@ LEGACY_LOG_TYPE_MAP: Dict[str, str] = {
 }
 
 
+def stringify_payload_numerics(value: Any) -> Any:
+    """
+    Cast numeric values in log/finding payloads to strings for Supabase JSON safety.
+
+    Scores and CVSS fields are stored as ``str(score)`` per Stronghold contract.
+    """
+    if isinstance(value, dict):
+        return {k: stringify_payload_numerics(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [stringify_payload_numerics(item) for item in value]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and value != value:
+            return "nan"
+        return str(value)
+    return value
+
+
 def normalize_log_type(raw: str) -> str:
     """Map legacy orchestrator types to production scan_logs CHECK vocabulary."""
     key = (raw or "info").strip().lower()
@@ -49,6 +68,8 @@ class SupabaseSync:
     def insert_scan_log(self, row: Dict[str, Any]) -> None:
         payload = dict(row)
         payload["type"] = normalize_log_type(str(payload.get("type", "info")))
+        if "payload" in payload and payload["payload"] is not None:
+            payload["payload"] = stringify_payload_numerics(payload["payload"])
         try:
             admin = self._admin_factory()
             admin.table("scan_logs").insert(payload).execute()

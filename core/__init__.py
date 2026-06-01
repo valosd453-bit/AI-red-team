@@ -1,10 +1,8 @@
 """
-Strike logic — target HTTP uses the scan-form API key only (Key Isolation).
+ForgeGuard Agathon core — orchestration, strike logic, target isolation.
 
-Re-exports from ``core.strike_logic`` for Railway/HF compatibility.
+Legacy imports: ``from agathon.orchestrator import app`` remain valid.
 """
-
-from core.strike_logic import *  # noqa: F403
 
 from core.strike_logic import (
     AUTH_FAILURE_MESSAGE,
