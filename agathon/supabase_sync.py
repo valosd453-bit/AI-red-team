@@ -50,6 +50,49 @@ def stringify_payload_numerics(value: Any) -> Any:
     return value
 
 
+_DASH_REPLACEMENTS = (
+    ("\u2014", "-"),  # em dash
+    ("\u2013", "-"),  # en dash
+    ("\u2012", "-"),  # figure dash
+    ("\u2212", "-"),  # minus sign
+)
+_SMART_QUOTE_REPLACEMENTS = (
+    ("\u2018", "'"),
+    ("\u2019", "'"),
+    ("\u201c", '"'),
+    ("\u201d", '"'),
+)
+
+
+def sanitize_text_for_transport(text: str) -> str:
+    """
+    Normalize Unicode punctuation that breaks ASCII-only transports.
+
+    Replaces em/en dashes with ASCII hyphen; ensures valid UTF-8 bytes.
+    """
+    if not text:
+        return text
+    for old, new in _DASH_REPLACEMENTS + _SMART_QUOTE_REPLACEMENTS:
+        text = text.replace(old, new)
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
+def sanitize_payload_strings(value: Any) -> Any:
+    """Recursively sanitize every string in a dict/list tree."""
+    if isinstance(value, str):
+        return sanitize_text_for_transport(value)
+    if isinstance(value, dict):
+        return {k: sanitize_payload_strings(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [sanitize_payload_strings(item) for item in value]
+    return value
+
+
+def prepare_outbound_payload(value: Any) -> Any:
+    """Numeric stringify + UTF-8 transport safety for Supabase / WebSocket egress."""
+    return sanitize_payload_strings(stringify_payload_numerics(value))
+
+
 def normalize_log_type(raw: str) -> str:
     """Map legacy orchestrator types to production scan_logs CHECK vocabulary."""
     key = (raw or "info").strip().lower()
@@ -68,8 +111,14 @@ class SupabaseSync:
     def insert_scan_log(self, row: Dict[str, Any]) -> None:
         payload = dict(row)
         payload["type"] = normalize_log_type(str(payload.get("type", "info")))
+        if payload.get("attack_name") is not None:
+            payload["attack_name"] = sanitize_text_for_transport(
+                str(payload["attack_name"])
+            )
+        if payload.get("severity") is not None:
+            payload["severity"] = sanitize_text_for_transport(str(payload["severity"]))
         if "payload" in payload and payload["payload"] is not None:
-            payload["payload"] = stringify_payload_numerics(payload["payload"])
+            payload["payload"] = prepare_outbound_payload(payload["payload"])
         try:
             admin = self._admin_factory()
             admin.table("scan_logs").insert(payload).execute()

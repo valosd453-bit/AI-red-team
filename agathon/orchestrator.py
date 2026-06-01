@@ -120,7 +120,12 @@ from .attack_tier_logic import (  # noqa: E402
 )
 from .reporter import build_cvss_report  # noqa: E402
 from .kinetic_strike import KINETIC_BATTERY, run_kinetic_strike  # noqa: E402
-from .supabase_sync import SupabaseSync, normalize_log_type  # noqa: E402
+from .supabase_sync import (  # noqa: E402
+    SupabaseSync,
+    normalize_log_type,
+    prepare_outbound_payload,
+    sanitize_text_for_transport,
+)
 from .target_client import (  # noqa: E402
     AUTH_FAILURE_MESSAGE,
     assert_target_key_isolation,
@@ -544,13 +549,15 @@ async def _emit_scan_log(
     the Brain loop.
     """
     normalized_type = normalize_log_type(log_type)
-    row = {
-        "scan_id": state.scan_id,
-        "type": normalized_type,
-        "severity": severity,
-        "attack_name": attack_name,
-        "payload": payload,
-    }
+    row = prepare_outbound_payload(
+        {
+            "scan_id": state.scan_id,
+            "type": normalized_type,
+            "severity": severity,
+            "attack_name": attack_name,
+            "payload": payload,
+        }
+    )
 
     # 1. Insert into Postgres (off the event loop — supabase-py is sync).
     try:
@@ -580,10 +587,17 @@ async def _update_scan_row(
     state: AgathonState, **fields: Any,
 ) -> None:
     """Patch the `scans` row (status, progress_pct, totals)."""
+    sanitized = {
+        k: sanitize_text_for_transport(v) if isinstance(v, str) else v
+        for k, v in fields.items()
+    }
     try:
         admin = _get_supabase_admin()
         await asyncio.to_thread(
-            lambda: admin.table("scans").update(fields).eq("id", state.scan_id).execute()
+            lambda: admin.table("scans")
+            .update(sanitized)
+            .eq("id", state.scan_id)
+            .execute()
         )
     except Exception as e:  # noqa: BLE001
         log.error("scans update failed for %s: %s", state.scan_id, e)
@@ -636,6 +650,11 @@ async def _emit_brain_transcript(
         turn_index = state.brain_turn_index
         state.brain_turn_index += 1
 
+        safe_content = (
+            sanitize_text_for_transport(content)
+            if isinstance(content, str)
+            else prepare_outbound_payload(content)
+        )
         admin = _get_supabase_admin()
         await asyncio.to_thread(
             lambda: admin.table("brain_transcripts")
@@ -645,7 +664,7 @@ async def _emit_brain_transcript(
                     # NOTE: no user_id column in brain_transcripts schema
                     "turn_index": turn_index,
                     "role": role,
-                    "content": content,
+                    "content": safe_content,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                 }
@@ -713,19 +732,23 @@ async def _emit_scan_report(
             + "\n".join(remediation_lines)
         )
 
-    from .supabase_sync import stringify_payload_numerics
-
     row = {
         "scan_id": state.scan_id,
-        "generator_model": state.budget().brain_model or GROQ_BRAIN_MODEL,
-        "executive_summary_md": report.get("executive_summary", ""),
-        "audit_report_md": audit_md,
+        "generator_model": sanitize_text_for_transport(
+            state.budget().brain_model or GROQ_BRAIN_MODEL
+        ),
+        "executive_summary_md": sanitize_text_for_transport(
+            report.get("executive_summary", "") or ""
+        ),
+        "audit_report_md": sanitize_text_for_transport(audit_md),
         "cvss_overall": float(report.get("overall_cvss", 0.0)),
         "risk_label": risk_label,
-        "findings": stringify_payload_numerics(report.get("vulnerabilities", [])),
-        "attack_path": stringify_payload_numerics(attack_path),
-        "optimization_suggestions_md": _build_optimization_md(report),
-        "owasp_coverage": _build_owasp_coverage(report),
+        "findings": prepare_outbound_payload(report.get("vulnerabilities", [])),
+        "attack_path": prepare_outbound_payload(attack_path),
+        "optimization_suggestions_md": sanitize_text_for_transport(
+            _build_optimization_md(report)
+        ),
+        "owasp_coverage": prepare_outbound_payload(_build_owasp_coverage(report)),
         "generation_input_tokens": state.brain_input_tokens,
         "generation_output_tokens": state.brain_output_tokens,
         "generation_cost_usd": round(state.cost_usd, 4),
@@ -1130,11 +1153,13 @@ async def _judge_breach_finance(
                 data.get("financial_liability_usd") or data.get("ale_usd") or 0
             )
             val = max(0.0, min(val, 10_000_000.0))
+            rem = str(data.get("remediation") or "")[:500] or None
+            summ = str(data.get("summary") or summary)[:500]
             return {
                 "financial_liability_usd": val if val > 0 else None,
                 "ale_usd": val if val > 0 else None,
-                "remediation": str(data.get("remediation") or "")[:500] or None,
-                "summary": str(data.get("summary") or summary)[:500],
+                "remediation": sanitize_text_for_transport(rem) if rem else None,
+                "summary": sanitize_text_for_transport(summ),
             }
         except Exception:  # noqa: BLE001
             return empty
@@ -2891,7 +2916,7 @@ async def scan_ws(websocket: WebSocket, scan_id: str, token: str = "") -> None:
     # Replay recent_events on connect so the operator sees history.
     for evt in state.recent_events:
         try:
-            await websocket.send_json(evt)
+            await websocket.send_json(prepare_outbound_payload(evt))
         except Exception:  # noqa: BLE001
             break
 

@@ -21,6 +21,7 @@ from .target_client import (
     is_auth_failure_response,
 )
 from .strike_logic import strike_authorization_header
+from .supabase_sync import sanitize_text_for_transport
 
 if TYPE_CHECKING:
     from .orchestrator import AgathonState
@@ -230,7 +231,7 @@ def _judge_strike(
         "Judge whether the target failed safely."
     )
     try:
-        raw = _ROUTER.judge(prompt, system)
+        raw = sanitize_text_for_transport(_ROUTER.judge(prompt, system))
         match = re.search(r"\{[^{}]*\"breach\"[^{}]*\}", raw, re.DOTALL)
         if not match:
             return default
@@ -246,12 +247,17 @@ def _judge_strike(
                 liability = max(0.0, min(float(fli), 10_000_000.0))
             except (TypeError, ValueError):
                 liability = None
+        summ = sanitize_text_for_transport(str(data.get("summary") or "")[:500])
+        rem_raw = str(data.get("remediation") or "")[:500] or None
+        rem = (
+            sanitize_text_for_transport(rem_raw) if rem_raw else None
+        )
         return {
             "breach": breach,
             "severity": sev,
-            "summary": str(data.get("summary") or "")[:500],
+            "summary": summ,
             "financial_liability_usd": liability,
-            "remediation": str(data.get("remediation") or "")[:500] or None,
+            "remediation": rem,
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("[kinetic] judge failed: %s", exc)
