@@ -2736,6 +2736,12 @@ async def _record_usage_events(state: AgathonState) -> None:
 # --------------------------------------------------------------------------- #
 
 
+class IdentityOcrRequest(BaseModel):
+    image_base64: str = Field(..., min_length=100)
+    mime_type: str = "image/jpeg"
+    profile_full_name: str = ""
+
+
 class StartScanRequest(BaseModel):
     scan_id: str = Field(..., min_length=8)
     user_id: str = Field(..., min_length=8)
@@ -2796,6 +2802,24 @@ async def health_check(
         "version": "2.4.0",
         "engine": "Agathon Sovereign",
     }
+
+
+@app.post(
+    "/identity/ocr",
+    dependencies=[Depends(_require_internal_secret)],
+)
+async def identity_ocr(req: IdentityOcrRequest) -> Dict[str, Any]:
+    """Vision OCR for ForgeGuard identity audit (internal token required)."""
+    from .identity_ocr import run_identity_ocr
+
+    result = await asyncio.to_thread(
+        lambda: run_identity_ocr(
+            image_base64=req.image_base64,
+            mime_type=req.mime_type,
+            profile_full_name=req.profile_full_name,
+        )
+    )
+    return {"ok": True, **result}
 
 
 @app.post(
