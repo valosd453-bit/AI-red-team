@@ -63,7 +63,7 @@ CVSS_TO_ANNUAL_EXPLOIT_PROBABILITY = {
 
 # Regulatory exposure per compromised record (various jurisdictions)
 REGULATORY_COST_PER_RECORD_USD = {
-    "GDPR":  175,   # up to 4% of global annual turnover
+    "GDPR":  150,   # per-record exposure (ForgeGuard financial judge floor)
     "CCPA":  125,   # statutory damages
     "HIPAA": 200,   # tiered penalties
     "PCI":   90,    # non-compliance fines

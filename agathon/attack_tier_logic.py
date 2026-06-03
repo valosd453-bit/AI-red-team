@@ -361,6 +361,20 @@ def budget_for(intensity: Intensity | str) -> TierBudget:
     return BUDGETS[intensity]
 
 
+def _garak_family_allowed(family: str, allowed: FrozenSet[str]) -> bool:
+    """Allow dynamic Garak entries when their canonical family is in tier."""
+    if family in allowed:
+        return True
+    if not isinstance(family, str) or not family.startswith("garak_"):
+        return False
+    canonical = family
+    for suffix in ("prompt_injection", "jailbreak", "pii_leak", "hallucination"):
+        if family == f"garak_{suffix}" or family.endswith(f"_{suffix}"):
+            canonical = f"garak_{suffix}"
+            break
+    return canonical in allowed
+
+
 def catalogue_for_tier(
     intensity: Intensity | str,
     full_catalogue: Iterable[Dict[str, Any]],
@@ -378,7 +392,9 @@ def catalogue_for_tier(
             if budget.intensity is not Intensity.RECON:
                 out.append(entry)
             continue
-        if fam in budget.allowed_families:
+        if fam in budget.allowed_families or _garak_family_allowed(
+            fam, budget.allowed_families
+        ):
             out.append(entry)
     return out
 

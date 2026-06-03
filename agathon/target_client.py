@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 from urllib.parse import urlparse
 
 from forgeguard_bridge import OpenAICompatibleClient
@@ -20,6 +19,8 @@ AUTH_FAILURE_MESSAGE = (
     "Authentication Error: Target rejected the provided API Key."
 )
 
+HANDSHAKE_ABORT_MESSAGE = "CRITICAL: Key-Provider Mismatch. Strike Aborted."
+
 # Engine env keys — never use for target Authorization
 _ENGINE_KEY_ENVS = (
     "GROQ_API_KEY",
@@ -29,20 +30,57 @@ _ENGINE_KEY_ENVS = (
 )
 
 
+class ProviderHandshakeError(ValueError):
+    """Raised when scan-form api_key prefix does not match target URL host."""
+
+
+def _url_host(target_url: str) -> str:
+    return (urlparse(target_url).hostname or "").lower()
+
+
+def provider_from_url_host(target_url: str) -> str | None:
+    """Return canonical provider when URL host is unambiguous, else None."""
+    host = _url_host(target_url)
+    url_lower = (target_url or "").lower()
+    if "groq.com" in host or "groq.com" in url_lower:
+        return "groq"
+    if "openai.com" in host or "api.openai" in host or "openai.com" in url_lower:
+        return "openai"
+    if "anthropic.com" in host or "anthropic.com" in url_lower:
+        return "anthropic"
+    return None
+
+
 def resolve_target_provider(target_url: str, explicit: str = "") -> str:
-    """Infer provider from URL host when not supplied by the runner."""
+    """Infer provider — URL host wins over explicit when host is unambiguous."""
+    from_url = provider_from_url_host(target_url)
+    if from_url:
+        return from_url
     if explicit and explicit.strip():
         return explicit.strip().lower()
-    host = (urlparse(target_url).hostname or "").lower()
-    if "groq.com" in host:
-        return "groq"
-    if "openai.com" in host or "api.openai" in host:
-        return "openai"
-    if "anthropic.com" in host:
-        return "anthropic"
+    host = _url_host(target_url)
     if "together.xyz" in host or "fireworks.ai" in host:
         return "openai_compat"
     return "openai_compat"
+
+
+def assert_provider_handshake(api_key: str, target_url: str) -> None:
+    """
+    Strict URL-first key prefix validation (ignores misleading target_provider).
+    """
+    key = (api_key or "").strip()
+    host = _url_host(target_url)
+    url_lower = (target_url or "").lower()
+
+    if "openai.com" in host or "openai.com" in url_lower or "api.openai" in url_lower:
+        if not key.startswith("sk-"):
+            log.critical(HANDSHAKE_ABORT_MESSAGE)
+            raise ProviderHandshakeError(HANDSHAKE_ABORT_MESSAGE)
+
+    if "groq.com" in host or "groq.com" in url_lower:
+        if not key.startswith("gsk_"):
+            log.critical(HANDSHAKE_ABORT_MESSAGE)
+            raise ProviderHandshakeError(HANDSHAKE_ABORT_MESSAGE)
 
 
 def _engine_env_keys() -> set[str]:
@@ -69,7 +107,7 @@ def assert_target_key_isolation(
         raise ValueError("Target API key is empty — provide the key from the scan form.")
 
     provider = resolve_target_provider(target_url, target_provider)
-    host = (urlparse(target_url).hostname or "").lower()
+    host = _url_host(target_url)
     engine_keys = _engine_env_keys()
 
     if key in engine_keys:
@@ -138,8 +176,9 @@ def build_target_client(
     max_tokens: int = 512,
 ) -> OpenAICompatibleClient:
     """Factory for kinetic weapon HTTP — validates isolation before firing."""
-    provider = resolve_target_provider(base_url, target_provider)
     scan_key = _require_user_scan_key(api_key)
+    assert_provider_handshake(scan_key, base_url)
+    provider = resolve_target_provider(base_url, target_provider)
     assert_target_key_isolation(
         scan_key, target_url=base_url, target_provider=provider
     )

@@ -128,6 +128,9 @@ from .supabase_sync import (  # noqa: E402
 )
 from .target_client import (  # noqa: E402
     AUTH_FAILURE_MESSAGE,
+    HANDSHAKE_ABORT_MESSAGE,
+    ProviderHandshakeError,
+    assert_provider_handshake,
     assert_target_key_isolation,
     build_target_client,
     is_auth_failure_response,
@@ -178,6 +181,7 @@ except Exception:  # noqa: BLE001
     _HAS_JUDGE = False
 
 _MAX_ALE_JUDGE_CALLS = 20
+MAX_DYNAMIC_PROBES = 512
 
 try:
     from .patch_generator import (  # noqa: E402
@@ -1109,13 +1113,16 @@ async def _judge_breach_finance(
     attack_name: str,
     severity: str,
     summary: str,
+    category: str = "",
+    target_response: str = "",
 ) -> Dict[str, Any]:
-    """DeepSeek-R1 (Judge) — financial_liability_usd + remediation for a breach."""
+    """DeepSeek-R1 (Judge) — Financial Liability Report with GDPR floor."""
     empty: Dict[str, Any] = {
         "financial_liability_usd": None,
         "ale_usd": None,
         "remediation": None,
         "summary": summary,
+        "financial_liability_report": None,
     }
     if not _HAS_JUDGE or _JUDGE_ROUTER is None:
         return empty
@@ -1123,46 +1130,32 @@ async def _judge_breach_finance(
         return empty
     state.ale_judge_calls += 1
 
-    system = (
-        "You are a financial risk quantifier for AI security incidents. "
-        "Return ONLY valid JSON: "
-        '{"financial_liability_usd": <number>, "remediation": "<action>", '
-        '"summary": "<one sentence>"}. '
-        "financial_liability_usd is single-incident USD liability (not annual). "
-        "Use IBM 2026 breach benchmarks. High/critical LLM breaches: $50k–$2M range."
-    )
+    from .financial_judge import judge_with_router
+
     prompt = (
-        f"Attack: {attack_name}\nSeverity: {severity}\nEvidence: {summary[:600]}\n"
-        "Estimate financial_liability_usd and remediation for this breach."
+        f"Attack: {attack_name}\nSeverity: {severity}\nCategory: {category}\n"
+        f"Evidence: {summary[:600]}\n"
+        f"Target response excerpt:\n{(target_response or summary)[:1200]}\n"
+        "Estimate records_leaked_estimate, operational_cost_usd, and financial_liability_usd."
     )
 
     def _call() -> Dict[str, Any]:
-        try:
-            raw = sanitize_text_for_transport(_JUDGE_ROUTER.judge(prompt, system))
-            import re as _re
-
-            match = _re.search(
-                r"\{[^{}]*\"financial_liability_usd\"[^{}]*\}", raw, _re.DOTALL
-            )
-            if not match:
-                match = _re.search(r"\{[^{}]*\"ale_usd\"[^{}]*\}", raw, _re.DOTALL)
-            if not match:
-                return empty
-            data = json.loads(match.group())
-            val = float(
-                data.get("financial_liability_usd") or data.get("ale_usd") or 0
-            )
-            val = max(0.0, min(val, 10_000_000.0))
-            rem = str(data.get("remediation") or "")[:500] or None
-            summ = str(data.get("summary") or summary)[:500]
-            return {
-                "financial_liability_usd": val if val > 0 else None,
-                "ale_usd": val if val > 0 else None,
-                "remediation": sanitize_text_for_transport(rem) if rem else None,
-                "summary": sanitize_text_for_transport(summ),
-            }
-        except Exception:  # noqa: BLE001
-            return empty
+        report = judge_with_router(
+            prompt=prompt,
+            category=category or attack_name,
+            target_response=target_response or summary,
+            judge_fn=lambda p, s: sanitize_text_for_transport(
+                _JUDGE_ROUTER.judge(p, s)
+            ),
+        )
+        out = empty.copy()
+        if report.breach and report.total_liability_usd > 0:
+            out["financial_liability_usd"] = report.total_liability_usd
+            out["ale_usd"] = report.total_liability_usd
+        out["remediation"] = report.remediation
+        out["summary"] = sanitize_text_for_transport(report.summary)
+        out["financial_liability_report"] = report.to_dict()
+        return out
 
     return await asyncio.to_thread(_call)
 
@@ -1228,12 +1221,17 @@ async def _apply_kinetic_result(
             attack_name=name,
             severity=sev,
             summary=str(payload.get("summary") or rationale)[:600],
+            category=str(payload.get("category") or entry.get("family") or ""),
+            target_response=str(payload.get("response_excerpt") or "")[:1200],
         )
         if finance.get("financial_liability_usd"):
             payload["financial_liability_usd"] = finance["financial_liability_usd"]
             payload["ale_usd"] = finance.get("ale_usd")
             finding["financial_liability_usd"] = finance["financial_liability_usd"]
             finding["ale_usd"] = finance.get("ale_usd")
+        if finance.get("financial_liability_report"):
+            payload["financial_liability_report"] = finance["financial_liability_report"]
+            finding["financial_liability_report"] = finance["financial_liability_report"]
         if finance.get("remediation"):
             payload["remediation"] = finance["remediation"]
         if finance.get("summary"):
@@ -1266,8 +1264,92 @@ async def _apply_kinetic_result(
     }
 
 
+async def _run_surface_probes(state: AgathonState) -> None:
+    """Run surface-kind probe vector (AI_MODEL / WEB_APP / API_GATEWAY / CHAT_BOT)."""
+    from probes import run_surface_probe
+
+    kind = (state.surface_kind or "llm").strip().lower()
+    await _emit_scan_log(
+        state,
+        log_type="info",
+        severity="info",
+        payload={
+            "message": f"Surface probe vector starting: {kind}",
+            "surface_kind": kind,
+        },
+    )
+    try:
+        results = await run_surface_probe(kind, state)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[surface] probe vector failed: %s", exc)
+        await _emit_scan_log(
+            state,
+            log_type="error",
+            severity="medium",
+            payload={"message": f"Surface probe error: {exc}"},
+        )
+        return
+
+    for item in results:
+        sev = str(item.get("severity", "info"))
+        success = bool(item.get("success"))
+        probe_name = str(item.get("probe", "surface_probe"))
+        payload = {
+            "success": success,
+            "surface": item.get("surface", kind),
+            "category": item.get("category", kind),
+            "summary": f"Surface probe {probe_name}: {'breach' if success else 'pass'}",
+            "response_excerpt": str(item.get("evidence", ""))[:500],
+        }
+        if success and sev not in ("info",):
+            finance = await _judge_breach_finance(
+                state,
+                attack_name=probe_name,
+                severity=sev,
+                summary=str(item.get("evidence", ""))[:600],
+                category=str(item.get("category") or kind),
+                target_response=str(item.get("evidence", ""))[:1200],
+            )
+            if finance.get("financial_liability_usd"):
+                payload["financial_liability_usd"] = finance["financial_liability_usd"]
+                payload["ale_usd"] = finance.get("ale_usd")
+            if finance.get("financial_liability_report"):
+                payload["financial_liability_report"] = finance["financial_liability_report"]
+            if finance.get("remediation"):
+                payload["remediation"] = finance["remediation"]
+
+        state.attacks_run += 1
+        state.findings.append(
+            {
+                "attack": probe_name,
+                "family": f"surface_{kind}",
+                "severity": sev,
+                "rationale": f"surface vector {kind}",
+                "payload": payload,
+                "ts": time.time(),
+            }
+        )
+        await _emit_scan_log(
+            state,
+            log_type="breach" if success and sev not in ("info",) else "strike",
+            severity=sev,
+            attack_name=probe_name,
+            payload=payload,
+        )
+
+    await _emit_scan_log(
+        state,
+        log_type="info",
+        severity="info",
+        payload={
+            "message": f"Surface probe vector complete ({len(results)} probes)",
+            "surface_kind": kind,
+        },
+    )
+
+
 async def _run_kinetic_battery(state: AgathonState) -> None:
-    """Mandatory target API battery — four strikes before the Brain loop."""
+    """Mandatory target API battery — jailbreak, prompt injection, PII strikes before Brain."""
     await _emit_scan_log(
         state,
         log_type="info",
@@ -1308,6 +1390,10 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
                 rationale="mandatory kinetic battery",
                 result=kinetic_result,
             )
+        except ProviderHandshakeError as e:
+            log.critical(HANDSHAKE_ABORT_MESSAGE)
+            await _handle_target_auth_failure(state, detail=str(e))
+            return
         except ValueError as e:
             await _handle_target_auth_failure(state, detail=str(e))
             return
@@ -1704,11 +1790,16 @@ async def _target_preflight(state: AgathonState) -> bool:
     """Liveness probe against the user-supplied target API key (Groq/OpenAI/etc)."""
 
     try:
+        assert_provider_handshake(state.api_key, state.target_url)
         assert_target_key_isolation(
             state.api_key,
             target_url=state.target_url,
             target_provider=state.target_provider,
         )
+    except ProviderHandshakeError as e:
+        log.critical(HANDSHAKE_ABORT_MESSAGE)
+        await _handle_target_auth_failure(state, detail=str(e))
+        return False
     except ValueError as e:
         await _handle_target_auth_failure(state, detail=str(e))
         return False
@@ -2499,17 +2590,32 @@ async def run_scan(state: AgathonState) -> None:
 
     final_status = "sealed"
     failure_reason: Optional[str] = None
+    is_llm_surface = (state.surface_kind or "llm").strip().lower() == "llm"
     try:
-        if not await _target_preflight(state):
-            final_status = "failed"
-            failure_reason = (
-                state.seal_reason
-                if state.seal_reason == AUTH_FAILURE_MESSAGE
-                else (state.seal_reason or "preflight_failed")
-            )
+        if is_llm_surface:
+            if not await _target_preflight(state):
+                final_status = "failed"
+                failure_reason = (
+                    state.seal_reason
+                    if state.seal_reason == AUTH_FAILURE_MESSAGE
+                    else (state.seal_reason or "preflight_failed")
+                )
+            else:
+                await _run_surface_probes(state)
+                await _run_kinetic_battery(state)
+                await _brain_loop(state)
         else:
-            await _run_kinetic_battery(state)
-            await _brain_loop(state)
+            try:
+                assert_provider_handshake(state.api_key, state.target_url)
+            except ProviderHandshakeError as e:
+                log.critical(HANDSHAKE_ABORT_MESSAGE)
+                await _handle_target_auth_failure(state, detail=str(e))
+                final_status = "failed"
+                failure_reason = str(e)
+            else:
+                await _run_surface_probes(state)
+                state.sealed = True
+                state.seal_reason = f"surface_probe_complete:{state.surface_kind}"
         if not state.sealed and not state.cancelled:
             failure_reason = state.seal_reason or "brain_loop_ended_unexpectedly"
             final_status = "failed"
@@ -2770,11 +2876,20 @@ app = FastAPI(title="Agathon Orchestrator", version="0.2.0")
 @app.on_event("startup")
 async def _startup_checks() -> None:
     from forgeguard_bridge import REGISTRY
+    from agathon.garak_catalog import probe_count
 
-    print(f"[registry] Garak heavy arsenal: {len(REGISTRY)} dynamic probes loaded.")
+    registry_size = len(REGISTRY)
+    garak_count = probe_count()
+    print(
+        f"[registry] Garak heavy arsenal: {registry_size} dynamic probes loaded "
+        f"(garak_classes={garak_count}, cap={MAX_DYNAMIC_PROBES})."
+    )
     log.info(
-        "[registry] Garak heavy arsenal: %d dynamic probes loaded",
-        len(REGISTRY),
+        "[registry] Garak heavy arsenal: %d dynamic probes loaded "
+        "(garak_classes=%d, cap=%d)",
+        registry_size,
+        garak_count,
+        MAX_DYNAMIC_PROBES,
     )
     if not _resolve_internal_token():
         log.warning(
@@ -2787,21 +2902,36 @@ async def _startup_checks() -> None:
         )
 
 
-_SURVIVAL_HEALTH: Dict[str, str] = {
+_SURVIVAL_HEALTH: Dict[str, Any] = {
     "status": "healthy",
     "engine": "Agathon-Sovereign",
 }
 
 
+def _health_payload() -> Dict[str, Any]:
+    try:
+        from forgeguard_bridge import REGISTRY
+        from agathon.garak_catalog import probe_count
+
+        return {
+            **_SURVIVAL_HEALTH,
+            "registry_size": len(REGISTRY),
+            "garak_probe_count": probe_count(),
+            "max_dynamic_probes": MAX_DYNAMIC_PROBES,
+        }
+    except Exception:  # noqa: BLE001
+        return dict(_SURVIVAL_HEALTH)
+
+
 @app.get("/healthz")
-async def healthz() -> Dict[str, str]:
-    return _SURVIVAL_HEALTH
+async def healthz() -> Dict[str, Any]:
+    return _health_payload()
 
 
 @app.get("/health")
-async def health_check() -> Dict[str, str]:
+async def health_check() -> Dict[str, Any]:
     """Survival probe for Railway / Vercel (/api/health/engine)."""
-    return _SURVIVAL_HEALTH
+    return _health_payload()
 
 
 @app.post(
@@ -2836,11 +2966,15 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
     provider = resolve_target_provider(safe_url, (req.target_provider or "").strip())
 
     try:
+        assert_provider_handshake(req.api_key, safe_url)
         assert_target_key_isolation(
             req.api_key,
             target_url=safe_url,
             target_provider=provider,
         )
+    except ProviderHandshakeError as e:
+        log.critical(HANDSHAKE_ABORT_MESSAGE)
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

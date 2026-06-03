@@ -19,8 +19,8 @@ from attacks.base_tester import (
 
 logger = logging.getLogger(__name__)
 
-MAX_PROBES = 24
-MAX_PROBES_PER_STRIKE = 12
+MAX_PROBES = 48
+MAX_PROBES_PER_STRIKE = 24
 
 CURATED_VECTORS: dict[str, List[str]] = {
     "prompt_injection": [

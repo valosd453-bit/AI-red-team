@@ -48,7 +48,41 @@ _MODULE_TO_CATEGORY: Dict[str, str] = {
     "goodside": "prompt_injection",
     "grandma": "jailbreak",
     "donotanswer": "jailbreak",
+    "tap": "prompt_injection",
+    "continuation": "jailbreak",
+    "lmrc": "jailbreak",
+    "realtoxicityprompts": "jailbreak",
+    "knownbads": "jailbreak",
+    "topic": "prompt_injection",
+    "suffix": "prompt_injection",
+    "xss": "prompt_injection",
+    "visual_jailbreak": "jailbreak",
+    "base64": "prompt_injection",
+    "ansiescape": "prompt_injection",
+    "figstep": "jailbreak",
+    "latentinjection": "prompt_injection",
 }
+
+_CANONICAL_CATEGORIES = frozenset(
+    {"prompt_injection", "jailbreak", "pii_leak", "hallucination"}
+)
+
+
+def canonical_garak_family(category: str) -> str:
+    """Map any Garak category to one of four tier-filterable families."""
+    cat = category.replace("-", "_").lower()
+    if cat not in _CANONICAL_CATEGORIES:
+        cat = _MODULE_TO_CATEGORY.get(cat, cat)
+    if cat not in _CANONICAL_CATEGORIES:
+        if "leak" in cat or "pii" in cat:
+            cat = "pii_leak"
+        elif "jail" in cat or "dan" in cat:
+            cat = "jailbreak"
+        elif "halluc" in cat or "mislead" in cat:
+            cat = "hallucination"
+        else:
+            cat = "prompt_injection"
+    return f"garak_{cat}"
 
 
 @dataclass(frozen=True)
@@ -123,7 +157,7 @@ def discover_garak_probes() -> List[GarakProbeSpec]:
             continue
 
         category = _category_for_module(short_name)
-        family = f"garak_{category.replace('-', '_')}"
+        family = canonical_garak_family(category)
         level = _level_for_module(short_name)
 
         for _attr, obj in inspect.getmembers(mod, inspect.isclass):
@@ -157,14 +191,14 @@ def get_kinetic_battery_strikes() -> List[Tuple[str, str]]:
     """
     Return (registry_name, category) pairs for the mandatory pre-Brain battery.
 
-    Picks one representative probe per priority family, then fills up to 8
-    strikes from discovered specs.
+    Picks representatives for jailbreak, prompt_injection, and pii_leak first,
+    then fills up to 24 strikes from discovered specs.
     """
     specs = discover_garak_probes()
     battery: List[Tuple[str, str]] = []
-    seen_families: set[str] = set()
+    seen_categories: set[str] = set()
+    priority = ("prompt_injection", "jailbreak", "pii_leak", "hallucination")
 
-    # Legacy names always work (forgeguard_bridge fallbacks)
     legacy = [
         ("garak.prompt_injection", "prompt_injection"),
         ("garak.jailbreak", "jailbreak"),
@@ -173,19 +207,28 @@ def get_kinetic_battery_strikes() -> List[Tuple[str, str]]:
     ]
     for name, cat in legacy:
         battery.append((name, cat))
-        seen_families.add(cat)
+        seen_categories.add(cat)
+
+    for cat in priority:
+        for spec in specs:
+            if spec.category != cat:
+                continue
+            if (spec.registry_name, cat) not in battery:
+                battery.append((spec.registry_name, cat))
+                seen_categories.add(cat)
+                break
 
     for spec in specs:
-        if len(battery) >= 8:
+        if len(battery) >= 24:
             break
         mod_key = spec.module_name.lower()
         cat = spec.category
-        if mod_key in KINETIC_BATTERY_FAMILIES or cat in seen_families:
+        if mod_key in KINETIC_BATTERY_FAMILIES or cat in priority:
             if (spec.registry_name, cat) not in battery:
                 battery.append((spec.registry_name, cat))
-                seen_families.add(cat)
+                seen_categories.add(cat)
 
-    return battery[:8]
+    return battery[:24]
 
 
 def make_registry_entry(
