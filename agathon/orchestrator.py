@@ -2963,6 +2963,7 @@ class StartScanRequest(BaseModel):
     ownership_verified: bool = False
     surface_kind: str = "llm"
     target_provider: str = ""
+    asset_value_usd: float = 0.0
 
 
 class StartScanResponse(BaseModel):
@@ -3085,6 +3086,12 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
 
     from .financial_judge import asset_value_for_intensity
 
+    asset_val = (
+        float(req.asset_value_usd)
+        if req.asset_value_usd and req.asset_value_usd > 0
+        else asset_value_for_intensity(req.intensity.value)
+    )
+
     state = AgathonState(
         scan_id=req.scan_id,
         user_id=req.user_id,
@@ -3095,7 +3102,7 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
         ownership_verified=bool(req.ownership_verified),
         surface_kind=(req.surface_kind or "llm").strip() or "llm",
         target_provider=provider,
-        asset_value_usd=asset_value_for_intensity(req.intensity.value),
+        asset_value_usd=asset_val,
     )
     asyncio.create_task(run_scan(state))
     return StartScanResponse(
