@@ -212,6 +212,34 @@ def _runtime_keys_present() -> bool:
     return any(os.environ.get(k, "").strip() for k in _RUNTIME_KEY_VARS)
 
 
+def hot_reload_garak_catalog() -> int:
+    """
+    Evict failed garak.probes imports and re-discover the full arsenal.
+    Triggered on first scan start when the bunker is live.
+    """
+    import sys
+
+    evicted = 0
+    for mod_name in list(sys.modules):
+        if mod_name.startswith("garak.probes."):
+            del sys.modules[mod_name]
+            evicted += 1
+    if evicted:
+        logger.info("[registry] Hot reload evicted %d garak.probes modules", evicted)
+
+    from forgeguard_bridge import reload_garak_heavy_registry
+
+    added, registry_size = reload_garak_heavy_registry()
+    n = probe_count(log=False)
+    msg = (
+        f"[registry] Hot reload probes detected: {n} "
+        f"(registry={registry_size}, added={added}, target {RUNTIME_TARGET_PROBES}+)"
+    )
+    print(msg, flush=True)
+    logger.info(msg)
+    return n
+
+
 def warm_runtime_garak_registry() -> int:
     """
     Re-discover Garak probes after the bunker env is live and extend REGISTRY.

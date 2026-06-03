@@ -126,16 +126,19 @@ from .supabase_sync import (  # noqa: E402
     prepare_outbound_payload,
     sanitize_text_for_transport,
 )
-from .target_client import (  # noqa: E402
+from .strike_dispatcher import (  # noqa: E402
     AUTH_FAILURE_MESSAGE,
     HANDSHAKE_ABORT_MESSAGE,
+    KEY_PROVIDER_MISMATCH,
     ProviderHandshakeError,
     assert_provider_handshake,
     assert_target_key_isolation,
-    build_target_client,
+    build_proof_of_work_poc,
+    build_weapon_client,
     is_auth_failure_response,
     resolve_target_provider,
 )
+from .strike_dispatcher import _mask_key  # noqa: E402
 
 # Elite 8 Genesis Pipeline — optional heavy deps; graceful degradation if absent
 try:
@@ -613,13 +616,18 @@ async def _handle_target_auth_failure(
     *,
     detail: str = "",
 ) -> None:
-    """Graceful 401 — seal scan, persist failure_reason, do not crash."""
+    """Graceful auth/mismatch — seal scan, persist failure_reason, do not crash."""
+    from .strike_dispatcher import KEY_PROVIDER_MISMATCH, _mask_key
+
+    detail_text = (detail or "")[:800]
+    is_mismatch = KEY_PROVIDER_MISMATCH in detail_text
+    reason = KEY_PROVIDER_MISMATCH if is_mismatch else AUTH_FAILURE_MESSAGE
     state.sealed = True
-    state.seal_reason = AUTH_FAILURE_MESSAGE
+    state.seal_reason = reason
     payload = {
-        "message": AUTH_FAILURE_MESSAGE,
-        "detail": (detail or "")[:800],
-        "key_mask": OpenAICompatibleClient._mask_key(state.api_key),
+        "message": reason,
+        "detail": detail_text,
+        "key_mask": _mask_key(state.api_key),
         "target_provider": state.target_provider or resolve_target_provider(
             state.target_url, ""
         ),
@@ -635,7 +643,7 @@ async def _handle_target_auth_failure(
         state,
         status="failed",
         progress_pct=100,
-        failure_reason=AUTH_FAILURE_MESSAGE,
+        failure_reason=reason,
         completed_at=time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
     )
 
@@ -1568,7 +1576,7 @@ async def _tool_run_attack(
             )
 
         # Registry/Garak fallback when kinetic judge reports no breach
-        client = build_target_client(
+        client = build_weapon_client(
             base_url=state.target_url,
             api_key=state.api_key,
             model=state.target_model,
@@ -1904,7 +1912,7 @@ async def _target_preflight(state: AgathonState) -> bool:
         return False
 
     def _probe() -> str:
-        client = build_target_client(
+        client = build_weapon_client(
             base_url=state.target_url,
             api_key=state.api_key,
             model=state.target_model,
@@ -1923,14 +1931,22 @@ async def _target_preflight(state: AgathonState) -> bool:
             "target_provider": state.target_provider or resolve_target_provider(
                 state.target_url, ""
             ),
-            "key_mask": OpenAICompatibleClient._mask_key(state.api_key),
+            "key_mask": _mask_key(state.api_key),
         },
     )
     probe = await asyncio.to_thread(_probe)
+    if KEY_PROVIDER_MISMATCH in probe:
+        await _handle_target_auth_failure(state, detail=probe[:800])
+        return False
     if is_auth_failure_response(probe):
         await _handle_target_auth_failure(state, detail=probe[:800])
         return False
     if probe.startswith("[transport-error]") or probe.startswith("[http-"):
+        detail = probe[:800]
+        if probe.startswith("[http-400]"):
+            reason = f"TARGET_HTTP_400: {detail}"
+        else:
+            reason = f"preflight_failed: {probe[:200]}"
         await _emit_scan_log(
             state,
             log_type="info",
@@ -1938,12 +1954,14 @@ async def _target_preflight(state: AgathonState) -> bool:
             attack_name="preflight",
             payload={
                 "message": "Target liveness probe failed — check API key, URL, and model id.",
-                "detail": probe[:800],
+                "detail": detail,
+                "failure_reason": reason,
                 "hint": "OpenAI: https://api.openai.com/v1 + sk-… key. Groq: https://api.groq.com/openai/v1 + gsk_…",
             },
         )
         state.sealed = True
-        state.seal_reason = f"preflight_failed: {probe[:200]}"
+        state.seal_reason = reason
+        await _update_scan_row(state, failure_reason=reason)
         return False
 
     await _emit_scan_log(
@@ -2665,8 +2683,21 @@ async def _elite8_pipeline(state: AgathonState) -> None:
         await _log(f"[SYNC] Supabase sync failed: {e}", "warn")
 
 
+_HOT_RELOAD_DONE = False
+
+
 async def run_scan(state: AgathonState) -> None:
     """Top-level lifecycle: probing -> brain loop -> seal -> usage emit."""
+    global _HOT_RELOAD_DONE
+    if not _HOT_RELOAD_DONE:
+        try:
+            from .garak_catalog import hot_reload_garak_catalog
+
+            hot_reload_garak_catalog()
+            _HOT_RELOAD_DONE = True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[registry] hot reload on first scan skipped: %s", exc)
+
     await _STATE.put(state)
     await _update_scan_row(
         state,
@@ -2696,7 +2727,12 @@ async def run_scan(state: AgathonState) -> None:
                 final_status = "failed"
                 failure_reason = (
                     state.seal_reason
-                    if state.seal_reason == AUTH_FAILURE_MESSAGE
+                    if state.seal_reason
+                    in (
+                        AUTH_FAILURE_MESSAGE,
+                        KEY_PROVIDER_MISMATCH,
+                    )
+                    or (state.seal_reason or "").startswith("TARGET_HTTP_400")
                     else (state.seal_reason or "preflight_failed")
                 )
             else:
@@ -2863,25 +2899,44 @@ async def _notify_agathon_webhook(
         ale_usd = round(liability, 2)
 
     top_breach = _top_breach_finding(state)
+    poc = top_breach.get("technical_proof_of_concept")
+    if not poc and not state.findings:
+        poc = build_proof_of_work_poc(
+            attacks_run=state.attacks_run,
+            intensity=state.intensity.value,
+        )
+    exec_summary = top_breach.get("executive_summary") or (
+        report.get("executive_summary") if report else None
+    )
+    if not exec_summary and not state.findings:
+        exec_summary = (
+            f"Scan complete — {state.attacks_run} vectors tested. "
+            "No exploitable vulnerabilities at current intensity."
+        )
+
     payload = {
         "kind": "scan.completed",
         "scan_id": state.scan_id,
         "payload": {
             "status": final_status,
-            "progress_pct": 100,
+            "progress_pct": "100",
             "failure_reason": failure_reason,
-            "attacks_run": state.attacks_run,
-            "wall_seconds": int(state.wall_seconds()),
-            "technical_report_md": technical_md,
-            "executive_summary": top_breach.get("executive_summary") or (
-                report.get("executive_summary") if report else None
-            ),
-            "technical_proof_of_concept": top_breach.get("technical_proof_of_concept"),
+            "attacks_run": str(state.attacks_run),
+            "wall_seconds": str(int(state.wall_seconds())),
+            "technical_report_md": technical_md or exec_summary or "",
+            "executive_summary": exec_summary,
+            "technical_proof_of_concept": poc,
             "remediation_code_snippet": top_breach.get("remediation_code_snippet"),
             "financial_liability_usd": str(ale_usd) if ale_usd is not None else None,
             "ale_usd": str(ale_usd) if ale_usd is not None else None,
-            "overall_cvss": str(report.get("overall_cvss", 0)) if report else None,
-            "overall_severity": report.get("overall_severity") if report else None,
+            "overall_cvss": str(report.get("overall_cvss", 0)) if report else "0",
+            "overall_severity": str(
+                report.get("overall_severity", "NONE") if report else "NONE"
+            ),
+            "findings": prepare_outbound_payload(
+                report.get("vulnerabilities", []) if report else []
+            ),
+            "proof_of_work": True,
         },
     }
 

@@ -11,16 +11,16 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from forgeguard_bridge import OpenAICompatibleClient
-
-from .target_client import (
+from .strike_dispatcher import (
     AUTH_FAILURE_MESSAGE,
     HANDSHAKE_ABORT_MESSAGE,
+    KEY_PROVIDER_MISMATCH,
     ProviderHandshakeError,
-    build_target_client,
+    WeaponLLMClient,
+    build_weapon_client,
     is_auth_failure_response,
+    strike_authorization_header,
 )
-from .strike_logic import strike_authorization_header
 from .supabase_sync import sanitize_text_for_transport
 
 if TYPE_CHECKING:
@@ -95,7 +95,7 @@ class TargetStrikeClient:
         max_tokens: int = 512,
     ) -> None:
         self._api_key = api_key.strip()
-        self._client = build_target_client(
+        self._client = build_weapon_client(
             base_url=base_url,
             api_key=self._api_key,
             model=model,
@@ -108,7 +108,8 @@ class TargetStrikeClient:
 
     @property
     def key_mask(self) -> str:
-        return OpenAICompatibleClient._mask_key(self._api_key)
+        from .strike_dispatcher import _mask_key
+        return _mask_key(self._api_key)
 
     def fire(self, prompt: str) -> TargetStrikeResult:
         """POST target /v1/chat/completions with the operator Bearer token."""
