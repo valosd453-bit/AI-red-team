@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, TYPE_CHECKING
 
@@ -16,8 +17,8 @@ logger = logging.getLogger(__name__)
 _PRIORITY = frozenset({"prompt_injection", "jailbreak", "pii_leak"})
 
 
-async def run_ai_model_probes(state: "AgathonState") -> List[Dict[str, Any]]:
-    """Run Garak/PyRIT probes against the LLM target via universal client."""
+def _run_ai_model_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
+    """Sync Garak/PyRIT probe loop — run via asyncio.to_thread from async callers."""
     findings: List[Dict[str, Any]] = []
     utc = build_universal_client(
         target_url=state.target_url,
@@ -97,3 +98,8 @@ async def run_ai_model_probes(state: "AgathonState") -> List[Dict[str, Any]]:
             logger.debug("[ai_model] pyrit %s skipped: %s", spec["name"], exc)
 
     return findings
+
+
+async def run_ai_model_probes(state: "AgathonState") -> List[Dict[str, Any]]:
+    """Run Garak/PyRIT probes without blocking the orchestrator event loop."""
+    return await asyncio.to_thread(_run_ai_model_probes_sync, state)

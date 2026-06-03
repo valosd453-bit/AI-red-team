@@ -217,6 +217,40 @@ logging.basicConfig(
 )
 log = logging.getLogger("agathon.orchestrator")
 
+# #region agent log
+_DEBUG_LOG_PATH = (
+    Path(__file__).resolve().parents[2] / "debug-c20499.log"
+)
+
+
+def _agent_debug(
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: Optional[Dict[str, Any]] = None,
+    *,
+    run_id: str = "audit-pre",
+) -> None:
+    try:
+        import json as _json
+
+        payload = {
+            "sessionId": "c20499",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data or {},
+            "timestamp": int(time.time() * 1000),
+        }
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as _f:
+            _f.write(_json.dumps(payload) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# #endregion
+
 
 # --------------------------------------------------------------------------- #
 # Lazy imports for heavy / optional deps                                       #
@@ -278,6 +312,37 @@ async def _sovereign_probe_pause(state: "AgathonState") -> None:
     """Fixed 5s gap between kinetic probes for Sovereign operators."""
     if _is_sovereign_scan(state):
         await asyncio.sleep(SOVEREIGN_PROBE_DELAY_S)
+
+
+async def _bump_progress(
+    state: "AgathonState",
+    pct: int,
+    *,
+    phase: str = "",
+    run_id: str = "post-fix",
+) -> None:
+    """Monotonic progress_pct — breaks the 2% stall between preflight and brain loop."""
+    target = max(state.progress_pct, min(95, int(pct)))
+    if target <= state.progress_pct:
+        return
+    state.progress_pct = target
+    await _update_scan_row(state, progress_pct=target)
+    if phase:
+        await _emit_scan_log(
+            state,
+            log_type="info",
+            severity="info",
+            payload={"message": f"Scan progress: {target}%", "phase": phase},
+        )
+    # #region agent log
+    _agent_debug(
+        "A",
+        "orchestrator.py:_bump_progress",
+        "progress_bumped",
+        {"scan_id": state.scan_id, "pct": target, "phase": phase},
+        run_id=run_id,
+    )
+    # #endregion
 
 
 def _get_groq_client():
@@ -362,8 +427,18 @@ def _validate_bearer(authorization: Optional[str]) -> None:
 
 def _require_internal_secret(
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    x_internal_scan_token: Optional[str] = Header(
+        default=None, alias="x-internal-scan-token"
+    ),
 ) -> None:
-    _validate_bearer(authorization)
+    if authorization and authorization.lower().startswith("bearer "):
+        _validate_bearer(authorization)
+        return
+    token = (x_internal_scan_token or "").strip()
+    if token:
+        _validate_bearer(f"Bearer {token}")
+        return
+    raise HTTPException(status_code=401, detail="Missing bearer token")
 
 
 def _const_eq(a: str, b: str) -> bool:
@@ -1487,6 +1562,7 @@ async def _run_kinetic_vectors(state: AgathonState) -> None:
             "surface_kind": kind,
         },
     )
+    await _bump_progress(state, 15, phase="kinetic_vectors_done")
 
 
 async def _run_surface_probes(state: AgathonState) -> None:
@@ -1505,7 +1581,9 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
             "strikes": [s[0] for s in KINETIC_BATTERY],
         },
     )
-    for strike_name, category in KINETIC_BATTERY:
+    battery = list(KINETIC_BATTERY)
+    battery_len = max(len(battery), 1)
+    for idx, (strike_name, category) in enumerate(battery):
         if state.cancelled or state.sealed:
             return
         await _emit_scan_log(
@@ -1540,6 +1618,10 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
                 result=kinetic_result,
             )
             await _sovereign_probe_pause(state)
+            pct = 15 + int((idx + 1) / battery_len * 30)
+            await _bump_progress(
+                state, pct, phase=f"kinetic_battery:{strike_name}"
+            )
         except ProviderHandshakeError as e:
             log.critical(HANDSHAKE_ABORT_MESSAGE)
             await _handle_target_auth_failure(state, detail=str(e))
@@ -1562,6 +1644,7 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
         severity="info",
         payload={"message": "Kinetic battery complete"},
     )
+    await _bump_progress(state, 48, phase="kinetic_battery_complete")
 
 
 async def _tool_run_attack(
@@ -2017,6 +2100,18 @@ async def _target_preflight(state: AgathonState) -> bool:
             "first_bytes": (probe or "")[:120],
         },
     )
+    # #region agent log
+    _agent_debug(
+        "A",
+        "orchestrator.py:_target_preflight",
+        "preflight_success",
+        {
+            "scan_id": state.scan_id,
+            "progress_pct": state.progress_pct,
+            "elapsed_s": round(state.wall_seconds(), 3),
+        },
+    )
+    # #endregion
     return True
 
 
@@ -2735,14 +2830,40 @@ _HOT_RELOAD_DONE = False
 async def run_scan(state: AgathonState) -> None:
     """Top-level lifecycle: probing -> brain loop -> seal -> usage emit."""
     global _HOT_RELOAD_DONE
+    # #region agent log
+    _scan_t0 = time.perf_counter()
+    _agent_debug(
+        "B",
+        "orchestrator.py:run_scan",
+        "run_scan_enter",
+        {"scan_id": state.scan_id, "sovereign": _is_sovereign_scan(state)},
+    )
+    # #endregion
     if not _HOT_RELOAD_DONE:
         try:
             from . import kinetic_strike
             from .garak_catalog import get_kinetic_battery_strikes, hot_reload_garak_catalog
 
-            hot_reload_garak_catalog()
-            kinetic_strike.KINETIC_BATTERY = get_kinetic_battery_strikes()
+            # #region agent log
+            _hr_t0 = time.perf_counter()
+            # #endregion
+            await asyncio.to_thread(hot_reload_garak_catalog)
+            kinetic_strike.KINETIC_BATTERY = await asyncio.to_thread(
+                get_kinetic_battery_strikes
+            )
             _HOT_RELOAD_DONE = True
+            # #region agent log
+            _agent_debug(
+                "B",
+                "orchestrator.py:run_scan",
+                "hot_reload_done",
+                {
+                    "scan_id": state.scan_id,
+                    "ms": round((time.perf_counter() - _hr_t0) * 1000, 2),
+                    "battery_len": len(kinetic_strike.KINETIC_BATTERY),
+                },
+            )
+            # #endregion
         except Exception as exc:  # noqa: BLE001
             log.warning("[registry] hot reload on first scan skipped: %s", exc)
 
@@ -2756,6 +2877,14 @@ async def run_scan(state: AgathonState) -> None:
             "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(state.started_at)
         ),
     )
+    # #region agent log
+    _agent_debug(
+        "A",
+        "orchestrator.py:run_scan",
+        "progress_set_2",
+        {"scan_id": state.scan_id, "ms_since_enter": round((time.perf_counter() - _scan_t0) * 1000, 2)},
+    )
+    # #endregion
     await _emit_scan_log(
         state, log_type="info", severity="info",
         payload={
@@ -2784,8 +2913,44 @@ async def run_scan(state: AgathonState) -> None:
                     else (state.seal_reason or "preflight_failed")
                 )
             else:
+                await _bump_progress(state, 5, phase="preflight_ok")
+                # #region agent log
+                _agent_debug(
+                    "C",
+                    "orchestrator.py:run_scan",
+                    "preflight_ok_entering_kinetic",
+                    {"scan_id": state.scan_id, "progress_pct": state.progress_pct},
+                )
+                _kv_t0 = time.perf_counter()
+                # #endregion
                 await _run_kinetic_vectors(state)
+                # #region agent log
+                _agent_debug(
+                    "C",
+                    "orchestrator.py:run_scan",
+                    "kinetic_vectors_done",
+                    {
+                        "scan_id": state.scan_id,
+                        "ms": round((time.perf_counter() - _kv_t0) * 1000, 2),
+                        "progress_pct": state.progress_pct,
+                    },
+                )
+                _kb_t0 = time.perf_counter()
+                # #endregion
                 await _run_kinetic_battery(state)
+                # #region agent log
+                _agent_debug(
+                    "C",
+                    "orchestrator.py:run_scan",
+                    "kinetic_battery_done",
+                    {
+                        "scan_id": state.scan_id,
+                        "ms": round((time.perf_counter() - _kb_t0) * 1000, 2),
+                        "progress_pct": state.progress_pct,
+                        "attacks_run": state.attacks_run,
+                    },
+                )
+                # #endregion
                 await _brain_loop(state)
         else:
             try:
