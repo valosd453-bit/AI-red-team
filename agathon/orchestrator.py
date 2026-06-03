@@ -137,6 +137,7 @@ from .strike_dispatcher import (  # noqa: E402
     build_weapon_client,
     is_auth_failure_response,
     resolve_target_provider,
+    provider_from_url,
 )
 from .strike_dispatcher import _mask_key  # noqa: E402
 
@@ -267,8 +268,10 @@ _groq_client = None  # module-level singleton
 _groq_semaphore = None
 
 SOVEREIGN_PROBE_DELAY_S = 5.0
+SOVEREIGN_PROBE_DELAY_ADAPTIVE_S = 10.0
+RATE_LIMIT_ESCALATE_AFTER = 2
 THROTTLE_SYSTEM_MESSAGE = (
-    "[SYSTEM] Groq Throttling detected. Slowing down strike battery..."
+    "[SYSTEM] Groq rate limit (429) detected. Engine is waiting for limit reset..."
 )
 
 
@@ -294,7 +297,32 @@ def _is_rate_limited_response(text: str) -> bool:
     )
 
 
-async def _emit_throttle_log(state: "AgathonState", *, detail: str = "") -> None:
+def _is_groq_free_tier_strike(state: "AgathonState") -> bool:
+    """True when the scan-form target key is a Groq gsk_ key on Groq endpoints."""
+    key = (state.api_key or "").strip()
+    if not key.startswith("gsk_"):
+        return False
+    url = (state.target_url or "").lower()
+    provider = (
+        (state.target_provider or provider_from_url(state.target_url, "") or "")
+    ).lower()
+    return provider == "groq" or "groq.com" in url
+
+
+def _effective_sovereign_delay(state: "AgathonState") -> float:
+    return float(
+        getattr(state, "sovereign_probe_delay_s", SOVEREIGN_PROBE_DELAY_S)
+        or SOVEREIGN_PROBE_DELAY_S
+    )
+
+
+async def _emit_throttle_log(
+    state: "AgathonState",
+    *,
+    detail: str = "",
+    source: str = "engine",
+) -> None:
+    delay_s = _effective_sovereign_delay(state)
     await _emit_scan_log(
         state,
         log_type="throttle",
@@ -303,14 +331,36 @@ async def _emit_throttle_log(state: "AgathonState", *, detail: str = "") -> None
         payload={
             "message": THROTTLE_SYSTEM_MESSAGE,
             "detail": (detail or "")[:400],
+            "source": source,
+            "delay_s": delay_s,
+            "free_tier_strike": _is_groq_free_tier_strike(state),
+            "rate_limit_hits": getattr(state, "rate_limit_hits", 0),
+            "waiting_for": "rate_limit_reset",
         },
     )
 
 
+async def _record_rate_limit_event(
+    state: "AgathonState",
+    *,
+    detail: str,
+    source: str = "strike",
+) -> None:
+    """Count 429 events, escalate probe delay 5s→10s, emit throttle breadcrumb."""
+    state.rate_limit_hits = int(getattr(state, "rate_limit_hits", 0)) + 1
+    if (
+        _is_groq_free_tier_strike(state)
+        and state.rate_limit_hits >= 1
+    ) or state.rate_limit_hits >= RATE_LIMIT_ESCALATE_AFTER:
+        state.sovereign_probe_delay_s = SOVEREIGN_PROBE_DELAY_ADAPTIVE_S
+    await _emit_throttle_log(state, detail=detail, source=source)
+    await asyncio.sleep(_effective_sovereign_delay(state))
+
+
 async def _sovereign_probe_pause(state: "AgathonState") -> None:
-    """Fixed 5s gap between kinetic probes for Sovereign operators."""
-    if _is_sovereign_scan(state):
-        await asyncio.sleep(SOVEREIGN_PROBE_DELAY_S)
+    """Gap between kinetic probes — 5s default, 10s after persistent 429s."""
+    if _is_sovereign_scan(state) or _is_groq_free_tier_strike(state):
+        await asyncio.sleep(_effective_sovereign_delay(state))
 
 
 async def _bump_progress(
@@ -604,6 +654,10 @@ class AgathonState:
     pending_escalation: Optional[Dict[str, Any]] = None
     escalation_resolved: asyncio.Event = field(default_factory=asyncio.Event)
     escalation_approved: bool = False
+
+    # Adaptive Groq rate-limit throttling ------------------------------------
+    rate_limit_hits: int = 0
+    sovereign_probe_delay_s: float = SOVEREIGN_PROBE_DELAY_S
 
     def wall_seconds(self) -> float:
         return time.time() - self.started_at
@@ -1463,6 +1517,9 @@ async def _apply_kinetic_result(
         attack_name=name,
         payload=payload,
     )
+    excerpt = str(payload.get("response_excerpt") or payload.get("detail") or "")
+    if _is_rate_limited_response(excerpt):
+        await _record_rate_limit_event(state, detail=excerpt[:400], source="run_attack")
 
     return {
         "ok": True,
@@ -1531,6 +1588,11 @@ async def _run_kinetic_vectors(state: AgathonState) -> None:
             "summary": f"{vector_label} / {probe_name}: {'breach' if success else 'pass'}",
             "response_excerpt": str(item.get("evidence", ""))[:500],
         }
+        evidence = str(item.get("evidence", ""))
+        if _is_rate_limited_response(evidence):
+            await _record_rate_limit_event(
+                state, detail=evidence[:400], source="kinetic_vectors"
+            )
         if success and sev not in ("info",):
             finance = await _judge_breach_finance(
                 state,
@@ -1629,7 +1691,9 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
                 return
             excerpt = str((kinetic_result.payload or {}).get("response_excerpt", ""))
             if _is_rate_limited_response(excerpt):
-                await _emit_throttle_log(state, detail=excerpt[:400])
+                await _record_rate_limit_event(
+                    state, detail=excerpt[:400], source="kinetic_battery"
+                )
             await _apply_kinetic_result(
                 state,
                 name=strike_name,
@@ -1716,6 +1780,11 @@ async def _tool_run_attack(
                 "error": AUTH_FAILURE_MESSAGE,
                 "auth_failure": True,
             }
+        excerpt = str((kinetic_result.payload or {}).get("response_excerpt", ""))
+        if _is_rate_limited_response(excerpt):
+            await _record_rate_limit_event(
+                state, detail=excerpt[:400], source="run_attack"
+            )
         if kinetic_result.success:
             return await _apply_kinetic_result(
                 state, name=name, entry=entry, rationale=rationale, result=kinetic_result
@@ -2081,7 +2150,15 @@ async def _target_preflight(state: AgathonState) -> bool:
         },
     )
     await _bump_progress(state, 3, phase="preflight_start")
-    probe = await asyncio.to_thread(_probe)
+    probe = ""
+    for _preflight_attempt in range(4):
+        probe = await asyncio.to_thread(_probe)
+        if _is_rate_limited_response(probe):
+            await _record_rate_limit_event(
+                state, detail=probe[:400], source="preflight"
+            )
+            continue
+        break
     if KEY_PROVIDER_MISMATCH in probe:
         await _handle_target_auth_failure(state, detail=probe[:800])
         return False
@@ -2090,6 +2167,10 @@ async def _target_preflight(state: AgathonState) -> bool:
         return False
     if probe.startswith("[transport-error]") or probe.startswith("[http-"):
         detail = probe[:800]
+        if _is_rate_limited_response(probe):
+            await _record_rate_limit_event(
+                state, detail=detail, source="preflight_exhausted"
+            )
         if probe.startswith("[http-400]"):
             reason = f"TARGET_HTTP_400: {detail}"
         else:
@@ -2246,11 +2327,12 @@ async def _brain_loop(state: AgathonState) -> None:
                     or type(e).__name__ in ("RateLimitError", "TooManyRequestsError")
                 )
                 if is_rate_limit and _attempt < _MAX_RETRIES:
-                    await _emit_throttle_log(state, detail=str(e)[:400])
-                    # Exponential backoff with ±20% jitter (floor 5s for Sovereign)
+                    await _record_rate_limit_event(
+                        state, detail=str(e)[:400], source="brain_loop"
+                    )
+                    # Exponential backoff with ±20% jitter (floor adaptive delay)
                     delay = min(_BACKOFF_CAP, _BACKOFF_BASE * (2 ** _attempt))
-                    if _is_sovereign_scan(state):
-                        delay = max(SOVEREIGN_PROBE_DELAY_S, delay)
+                    delay = max(_effective_sovereign_delay(state), delay)
                     jitter = delay * 0.2 * (2 * _random.random() - 1)
                     wait = delay + jitter
                     log.warning(
@@ -2449,9 +2531,11 @@ async def _brain_loop(state: AgathonState) -> None:
         # Each brain turn consumes ~1,800 tokens.  At 3 s / turn that is up to
         # 20 turns/min → ~36k TPM, which consistently triggers 429 storms.
         # At 7 s / turn: ~8.6 turns/min → ~15k TPM, safely under the cap.
-        # Expected scan time with MAX_BRAIN_TURNS=40: 40 × 7 s ≈ 5 minutes
-        # (down from 13+ minutes caused by compounding retry delays).
-        await asyncio.sleep(7.0)
+        # Escalate to 10s+ when Groq 429 breadcrumbs fire.
+        brain_sleep = 7.0
+        if state.rate_limit_hits > 0:
+            brain_sleep = max(10.0, _effective_sovereign_delay(state))
+        await asyncio.sleep(brain_sleep)
 
 
 _BRAIN_WINDOW = 8
@@ -2860,6 +2944,21 @@ async def run_scan(state: AgathonState) -> None:
         {"scan_id": state.scan_id, "sovereign": _is_sovereign_scan(state)},
     )
     # #endregion
+    if _is_groq_free_tier_strike(state):
+        await _emit_scan_log(
+            state,
+            log_type="info",
+            severity="info",
+            attack_name="adaptive_throttle",
+            payload={
+                "message": (
+                    "Groq free-tier target key detected — adaptive throttle active "
+                    f"({SOVEREIGN_PROBE_DELAY_S}s→{SOVEREIGN_PROBE_DELAY_ADAPTIVE_S}s on 429)."
+                ),
+                "initial_delay_s": SOVEREIGN_PROBE_DELAY_S,
+                "adaptive_delay_s": SOVEREIGN_PROBE_DELAY_ADAPTIVE_S,
+            },
+        )
     if not _HOT_RELOAD_DONE:
         try:
             from . import kinetic_strike

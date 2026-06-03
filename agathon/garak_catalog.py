@@ -123,7 +123,7 @@ def _category_for_module(module_name: str) -> str:
     return _MODULE_TO_CATEGORY.get(key, key)
 
 
-def _is_probe_class(obj: Any, module_name: str) -> bool:
+def _is_probe_class(obj: Any, modname: str) -> bool:
     """Return True if ``obj`` looks like a Garak Probe class."""
     if not inspect.isclass(obj):
         return False
@@ -133,15 +133,49 @@ def _is_probe_class(obj: Any, module_name: str) -> bool:
     if name in ("Probe", "TreeSearchProbe"):
         return False
     mod = getattr(obj, "__module__", "") or ""
-    if f"garak.probes.{module_name}" not in mod and module_name not in mod:
+    if not mod.startswith("garak.probes"):
         return False
     try:
         from garak.probes.base import Probe  # type: ignore
 
         return issubclass(obj, Probe) and obj is not Probe
     except Exception:  # noqa: BLE001
-        # Fallback: Garak probes are conventionally PascalCase in probe modules
         return bool(re.match(r"^[A-Z][A-Za-z0-9_]+$", name))
+
+
+def _probe_family_key(modname: str) -> str:
+    """Extract probe family from a garak.probes.* module path."""
+    parts = modname.split(".")
+    if len(parts) >= 3 and parts[0] == "garak" and parts[1] == "probes":
+        return parts[2].lower().replace("-", "_")
+    return parts[-1].lower().replace("-", "_")
+
+
+def _registry_name_for(modname: str, class_name: str) -> str:
+    """Build forgeguard registry key: garak.<relative>.ClassName."""
+    rel = modname.split("garak.probes.", 1)[-1] if modname.startswith("garak.probes.") else modname
+    return f"garak.{rel}.{class_name}"
+
+
+def _iter_garak_probe_modules(probes_root: Any) -> List[str]:
+    """
+    Force-walk every importable ``garak.probes.*`` module (including nested).
+
+    Uses ``pkgutil.walk_packages`` so dynamic plugin subpackages are not missed.
+    """
+    prefix = probes_root.__name__ + "."
+    names: List[str] = []
+    for _finder, modname, ispkg in pkgutil.walk_packages(
+        probes_root.__path__, prefix=prefix
+    ):
+        if ispkg:
+            continue
+        leaf = modname.rsplit(".", 1)[-1]
+        if leaf.startswith("_"):
+            continue
+        names.append(modname)
+    names.sort()
+    return names
 
 
 def _runtime_keys_present() -> bool:
@@ -173,7 +207,7 @@ def discover_garak_probes(
     env: Optional[Dict[str, str]] = None,
 ) -> List[GarakProbeSpec]:
     """
-    Walk ``garak.probes`` and collect concrete Probe subclasses.
+    Walk ``garak.probes.*`` and collect concrete Probe subclasses.
 
     Returns an empty list when garak is not installed; callers fall back to
     the four legacy garak.* catalogue entries.
@@ -182,36 +216,49 @@ def discover_garak_probes(
 
     _sync_runtime_env_for_garak(env or dict(os.environ))
     specs: List[GarakProbeSpec] = []
+    seen: set[str] = set()
+    modules_tried = 0
+    modules_failed = 0
     try:
+        import garak  # type: ignore  # noqa: F401 — force parent package
         import garak.probes as probes_root  # type: ignore
     except ImportError:
         logger.warning("[garak_catalog] garak not installed — using legacy 4 probes")
         return specs
 
-    for modinfo in pkgutil.iter_modules(probes_root.__path__, probes_root.__name__ + "."):
-        short_name = modinfo.name.split(".")[-1]
-        if short_name.startswith("_"):
-            continue
+    modnames = _iter_garak_probe_modules(probes_root)
+    logger.info(
+        "[garak_catalog] manual garak.probes.* walk: %d module paths queued",
+        len(modnames),
+    )
+
+    for modname in modnames:
+        modules_tried += 1
+        family_key = _probe_family_key(modname)
         try:
-            mod = importlib.import_module(modinfo.name)
+            mod = importlib.import_module(modname)
         except Exception as exc:  # noqa: BLE001
+            modules_failed += 1
             log_fn = logger.info if len(specs) < RUNTIME_TARGET_PROBES else logger.debug
-            log_fn("[garak_catalog] skip module %s: %s", modinfo.name, exc)
+            log_fn("[garak_catalog] skip module %s: %s", modname, exc)
             continue
 
-        category = _category_for_module(short_name)
+        category = _category_for_module(family_key)
         family = canonical_garak_family(category)
-        level = _level_for_module(short_name)
+        level = _level_for_module(family_key)
 
         for _attr, obj in inspect.getmembers(mod, inspect.isclass):
-            if not _is_probe_class(obj, short_name):
+            if not _is_probe_class(obj, modname):
                 continue
             class_name = obj.__name__
-            registry_name = f"garak.{short_name}.{class_name}"
+            registry_name = _registry_name_for(modname, class_name)
+            if registry_name in seen:
+                continue
+            seen.add(registry_name)
             specs.append(
                 GarakProbeSpec(
                     registry_name=registry_name,
-                    module_name=short_name,
+                    module_name=family_key,
                     class_name=class_name,
                     category=category,
                     family=family,
@@ -219,9 +266,14 @@ def discover_garak_probes(
                 )
             )
 
-    # Stable ordering for reproducible catalogues
     specs.sort(key=lambda s: s.registry_name)
-    logger.info("[garak_catalog] discovered %d Garak probe classes", len(specs))
+    logger.info(
+        "[garak_catalog] discovered %d Garak probe classes "
+        "(%d modules tried, %d import failures)",
+        len(specs),
+        modules_tried,
+        modules_failed,
+    )
     return specs
 
 
@@ -236,15 +288,9 @@ def probe_count(*, log: bool = True, env: Optional[Dict[str, str]] = None) -> in
     return n
 
 
-def _runtime_keys_present() -> bool:
-    import os
-
-    return any(os.environ.get(k, "").strip() for k in _RUNTIME_KEY_VARS)
-
-
 def hot_reload_garak_catalog() -> int:
     """
-    Evict failed garak.probes imports and re-discover the full arsenal.
+    Evict garak imports and re-discover the full arsenal via garak.probes.* walk.
     Triggered on first scan start when the bunker is live.
     """
     import os
@@ -255,22 +301,37 @@ def hot_reload_garak_catalog() -> int:
 
     evicted = 0
     for mod_name in list(sys.modules):
-        if mod_name == "garak.probes" or mod_name.startswith("garak.probes."):
+        if mod_name == "garak" or mod_name.startswith("garak."):
             del sys.modules[mod_name]
             evicted += 1
     if evicted:
-        logger.info("[registry] Hot reload evicted %d garak.probes modules", evicted)
+        logger.info("[registry] Hot reload evicted %d garak.* modules", evicted)
+
+    # Force-import probe tree root before walk
+    try:
+        importlib.import_module("garak")
+        importlib.import_module("garak.probes")
+    except ImportError as exc:
+        logger.warning("[registry] garak import failed during hot reload: %s", exc)
+        return 0
 
     from forgeguard_bridge import reload_garak_heavy_registry
 
     added, registry_size = reload_garak_heavy_registry()
-    n = probe_count(log=False, env=runtime_env)
+    n = probe_count(log=True, env=runtime_env)
     msg = (
         f"[registry] Hot reload probes detected: {n} "
         f"(registry={registry_size}, added={added}, target {RUNTIME_TARGET_PROBES}+)"
     )
     print(msg, flush=True)
     logger.info(msg)
+    if n < RUNTIME_TARGET_PROBES:
+        logger.warning(
+            "[registry] Garak count %d below target %d after hot reload — "
+            "check garak install and runtime API keys",
+            n,
+            RUNTIME_TARGET_PROBES,
+        )
     return n
 
 
