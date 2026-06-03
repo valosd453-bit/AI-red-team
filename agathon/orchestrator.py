@@ -722,6 +722,15 @@ async def _update_scan_row(
         )
     except Exception as e:  # noqa: BLE001
         log.error("scans update failed for %s: %s", state.scan_id, e)
+        # #region agent log
+        _agent_debug(
+            "A",
+            "orchestrator.py:_update_scan_row",
+            "scans_update_failed",
+            {"scan_id": state.scan_id, "fields": list(fields.keys()), "error": str(e)[:300]},
+            run_id="post-fix",
+        )
+        # #endregion
 
 
 async def _handle_target_auth_failure(
@@ -952,6 +961,15 @@ async def _emit_scan_report(
         )
     except Exception as e:  # noqa: BLE001
         log.error("scan_reports upsert failed: %s", e)
+        # #region agent log
+        _agent_debug(
+            "E",
+            "orchestrator.py:_emit_scan_report",
+            "scan_reports_upsert_failed",
+            {"scan_id": state.scan_id, "error": str(e)[:400]},
+            run_id="post-fix",
+        )
+        # #endregion
 
 
 def _build_optimization_md(report: Dict[str, Any]) -> str:
@@ -3127,6 +3145,16 @@ async def _notify_agathon_webhook(
             "No exploitable vulnerabilities at current intensity."
         )
 
+    overall_sev = "NONE"
+    if report:
+        raw_sev = str(report.get("overall_severity") or "NONE").strip().upper()
+        if raw_sev in {"NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+            overall_sev = raw_sev
+        elif raw_sev in {"INFO", "INFORMATIONAL"}:
+            overall_sev = "LOW"
+
+    attacks_run_int = int(round(float(state.attacks_run or 0)))
+
     payload = {
         "kind": "scan.completed",
         "scan_id": state.scan_id,
@@ -3134,7 +3162,7 @@ async def _notify_agathon_webhook(
             "status": final_status,
             "progress_pct": "100",
             "failure_reason": failure_reason,
-            "attacks_run": str(state.attacks_run),
+            "attacks_run": str(attacks_run_int),
             "wall_seconds": str(int(state.wall_seconds())),
             "technical_report_md": technical_md or exec_summary or "",
             "executive_summary": exec_summary,
@@ -3143,9 +3171,7 @@ async def _notify_agathon_webhook(
             "financial_liability_usd": str(ale_usd) if ale_usd is not None else None,
             "ale_usd": str(ale_usd) if ale_usd is not None else None,
             "overall_cvss": str(report.get("overall_cvss", 0)) if report else "0",
-            "overall_severity": str(
-                report.get("overall_severity", "NONE") if report else "NONE"
-            ),
+            "overall_severity": overall_sev,
             "findings": prepare_outbound_payload(
                 report.get("vulnerabilities", []) if report else []
             ),
