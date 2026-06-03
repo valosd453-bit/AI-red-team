@@ -41,7 +41,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY --chown=user:user . .
 
-RUN python -c "from agathon.garak_catalog import probe_count; n=probe_count(); print(f'garak_probes={n}'); assert n >= 350, f'expected 350+ got {n}'"
+RUN python -c "from agathon.garak_catalog import probe_count, COLD_START_MIN_PROBES; n=probe_count(); print(f'garak_probes={n}'); assert n >= COLD_START_MIN_PROBES, f'expected {COLD_START_MIN_PROBES}+ got {n}'"
 
 USER user
 

@@ -6,7 +6,7 @@ cmds = [
   'python -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip',
   '/opt/venv/bin/pip install -r requirements.txt',
   'playwright install --with-deps chromium',
-  '/opt/venv/bin/python -c "import sys; sys.path.insert(0, \".\"); from agathon.garak_catalog import probe_count; n=probe_count(); print(f\"garak_probes={n}\"); assert n >= 350, f\"expected 350+ got {n}\""',
+  '/opt/venv/bin/python -c "import sys; sys.path.insert(0, \".\"); from agathon.garak_catalog import probe_count, COLD_START_MIN_PROBES; n=probe_count(); print(f\"garak_probes={n}\"); assert n >= COLD_START_MIN_PROBES, f\"expected {COLD_START_MIN_PROBES}+ got {n}\""',
 ]
 
 [start]

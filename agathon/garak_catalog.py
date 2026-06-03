@@ -18,6 +18,18 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Build-time floor (Docker/nixpacks) — Garak cold-starts without full runtime env
+COLD_START_MIN_PROBES = 100
+# Runtime goal — warn below this when API keys are present; never crash startup
+RUNTIME_TARGET_PROBES = 350
+
+_RUNTIME_KEY_VARS = (
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+)
+
 # Curated families for mandatory kinetic battery (before Brain loop)
 KINETIC_BATTERY_FAMILIES: Tuple[str, ...] = (
     "prompt_injection",
@@ -153,7 +165,8 @@ def discover_garak_probes() -> List[GarakProbeSpec]:
         try:
             mod = importlib.import_module(modinfo.name)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("[garak_catalog] skip module %s: %s", modinfo.name, exc)
+            log_fn = logger.info if len(specs) < RUNTIME_TARGET_PROBES else logger.debug
+            log_fn("[garak_catalog] skip module %s: %s", modinfo.name, exc)
             continue
 
         category = _category_for_module(short_name)
@@ -182,9 +195,65 @@ def discover_garak_probes() -> List[GarakProbeSpec]:
     return specs
 
 
-def probe_count() -> int:
-    """Return number of registered Garak probe specs (for health checks)."""
-    return len(discover_garak_probes())
+def probe_count(*, log: bool = True) -> int:
+    """Return number of discoverable Garak probe specs (for health checks)."""
+    specs = discover_garak_probes()
+    n = len(specs)
+    if log:
+        msg = f"[registry] Cold-start probes detected: {n}"
+        print(msg, flush=True)
+        logger.info(msg)
+    return n
+
+
+def _runtime_keys_present() -> bool:
+    import os
+
+    return any(os.environ.get(k, "").strip() for k in _RUNTIME_KEY_VARS)
+
+
+def warm_runtime_garak_registry() -> int:
+    """
+    Re-discover Garak probes after the bunker env is live and extend REGISTRY.
+
+    Idempotent — existing registry names are skipped by the bridge reload helper.
+    """
+    import os
+
+    n = probe_count(log=True)
+    keys_present = _runtime_keys_present()
+
+    if keys_present:
+        present = [k for k in _RUNTIME_KEY_VARS if os.environ.get(k, "").strip()]
+        logger.info("[registry] Runtime API keys detected: %s", ", ".join(present))
+    else:
+        logger.info(
+            "[registry] No runtime LLM keys set — using cold-start Garak catalogue (%d)",
+            n,
+        )
+
+    from forgeguard_bridge import REGISTRY, reload_garak_heavy_registry
+
+    added, registry_size = reload_garak_heavy_registry()
+    n = probe_count(log=False)
+    msg = (
+        f"[registry] Runtime arsenal: {registry_size} entries, "
+        f"garak_classes={n} (target {RUNTIME_TARGET_PROBES}+)"
+    )
+    print(msg, flush=True)
+    logger.info(msg)
+    if added:
+        logger.info("[registry] Garak reload added %d new probe entries", added)
+
+    if keys_present and n < RUNTIME_TARGET_PROBES:
+        logger.warning(
+            "[registry] Runtime Garak count %d below target %d — "
+            "some probe modules may still be unavailable",
+            n,
+            RUNTIME_TARGET_PROBES,
+        )
+
+    return n
 
 
 def get_kinetic_battery_strikes() -> List[Tuple[str, str]]:

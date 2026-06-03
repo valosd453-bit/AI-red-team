@@ -2982,20 +2982,19 @@ app = FastAPI(title="Agathon Orchestrator", version="0.2.0")
 @app.on_event("startup")
 async def _startup_checks() -> None:
     from forgeguard_bridge import REGISTRY
-    from agathon.garak_catalog import probe_count
+    from agathon.garak_catalog import probe_count, RUNTIME_TARGET_PROBES
 
     registry_size = len(REGISTRY)
-    garak_count = probe_count()
+    garak_count = probe_count(log=False)
     print(
-        f"[registry] Garak heavy arsenal: {registry_size} dynamic probes loaded "
-        f"(garak_classes={garak_count}, cap={MAX_DYNAMIC_PROBES})."
+        f"[registry] Startup summary: {registry_size} registry entries, "
+        f"garak_classes={garak_count} (target {RUNTIME_TARGET_PROBES}+)."
     )
     log.info(
-        "[registry] Garak heavy arsenal: %d dynamic probes loaded "
-        "(garak_classes=%d, cap=%d)",
+        "[registry] Startup summary: %d registry entries, garak_classes=%d (target %d+)",
         registry_size,
         garak_count,
-        MAX_DYNAMIC_PROBES,
+        RUNTIME_TARGET_PROBES,
     )
     if not _resolve_internal_token():
         log.warning(

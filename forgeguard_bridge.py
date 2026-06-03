@@ -826,6 +826,19 @@ def _extend_registry_with_pyrit(base: List[Dict[str, Any]]) -> List[Dict[str, An
 REGISTRY = _extend_registry_with_pyrit(_extend_registry_with_garak_heavy(REGISTRY))
 
 
+def reload_garak_heavy_registry() -> tuple[int, int]:
+    """
+    Re-run Garak discovery and append any new probe entries to REGISTRY.
+
+    Returns:
+        (added_count, total_registry_size)
+    """
+    existing = {e["name"] for e in REGISTRY}
+    _extend_registry_with_garak_heavy(REGISTRY)
+    added = sum(1 for e in REGISTRY if e["name"] not in existing)
+    return added, len(REGISTRY)
+
+
 # --------------------------------------------------------------------------- #
 # Main                                                                        #
 # --------------------------------------------------------------------------- #
