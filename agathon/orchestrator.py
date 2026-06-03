@@ -297,11 +297,10 @@ def _is_rate_limited_response(text: str) -> bool:
 async def _emit_throttle_log(state: "AgathonState", *, detail: str = "") -> None:
     await _emit_scan_log(
         state,
-        log_type="info",
+        log_type="throttle",
         severity="info",
         attack_name="system_throttle",
         payload={
-            "type": "throttle",
             "message": THROTTLE_SYSTEM_MESSAGE,
             "detail": (detail or "")[:400],
         },
@@ -941,6 +940,7 @@ async def _emit_scan_report(
         "generation_cost_usd": round(state.cost_usd, 4),
         "financial_liability_usd": round(liability_sum, 2) if liability_sum > 0 else None,
         "ale_usd": round(liability_sum, 2) if liability_sum > 0 else report.get("ale_usd"),
+        "attacks_run": float(state.attacks_run),
     }
 
     try:

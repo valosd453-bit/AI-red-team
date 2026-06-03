@@ -9,7 +9,16 @@ from typing import Any, Callable, Dict, Optional
 
 log = logging.getLogger(__name__)
 
-ALLOWED_LOG_TYPES = frozenset({"info", "thought", "strike", "breach", "finance"})
+ALLOWED_LOG_TYPES = frozenset({
+    "info",
+    "thought",
+    "strike",
+    "breach",
+    "finance",
+    "defense",
+    "webhook",
+    "throttle",
+})
 
 LEGACY_LOG_TYPE_MAP: Dict[str, str] = {
     "info": "info",
@@ -23,6 +32,9 @@ LEGACY_LOG_TYPE_MAP: Dict[str, str] = {
     "finding": "breach",
     "tool_run": "strike",
     "tool_authored": "thought",
+    "throttle": "throttle",
+    "webhook": "webhook",
+    "defense": "defense",
     # kinetic vocabulary passes through
     "thought": "thought",
     "strike": "strike",
