@@ -74,7 +74,7 @@ def sanitize_text_for_transport(text: str) -> str:
         return text
     for old, new in _DASH_REPLACEMENTS + _SMART_QUOTE_REPLACEMENTS:
         text = text.replace(old, new)
-    return text.encode("ascii", "ignore").decode("ascii")
+    return str(text).encode("ascii", "ignore").decode("ascii")
 
 
 def sanitize_payload_strings(value: Any) -> Any:
@@ -109,14 +109,8 @@ class SupabaseSync:
         self._admin_factory = admin_factory
 
     def insert_scan_log(self, row: Dict[str, Any]) -> None:
-        payload = dict(row)
+        payload = sanitize_payload_strings(dict(row))
         payload["type"] = normalize_log_type(str(payload.get("type", "info")))
-        if payload.get("attack_name") is not None:
-            payload["attack_name"] = sanitize_text_for_transport(
-                str(payload["attack_name"])
-            )
-        if payload.get("severity") is not None:
-            payload["severity"] = sanitize_text_for_transport(str(payload["severity"]))
         if "payload" in payload and payload["payload"] is not None:
             payload["payload"] = prepare_outbound_payload(payload["payload"])
         try:

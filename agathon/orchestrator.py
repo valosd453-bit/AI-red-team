@@ -3469,6 +3469,6 @@ if __name__ == "__main__":  # pragma: no cover
     uvicorn.run(
         "agathon.orchestrator:app",
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", 7860)),
+        port=7860,
         log_level=log_level.lower(),
     )

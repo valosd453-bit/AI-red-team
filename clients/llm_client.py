@@ -46,7 +46,8 @@ except ImportError:
         if not text:
             return text
         return (
-            text.replace("\u2014", "-")
+            str(text)
+            .replace("\u2014", "-")
             .encode("ascii", "ignore")
             .decode("ascii")
         )
