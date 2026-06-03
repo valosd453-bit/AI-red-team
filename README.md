@@ -40,8 +40,10 @@ Optional webhook callback (engine → ForgeGuard):
 
 ### Health endpoints
 
-- `GET /healthz` — liveness (no auth)
-- `GET /health` — dashboard handshake (requires `Authorization: Bearer <INTERNAL_SCAN_TOKEN>`)
+- `GET /health` — survival liveness (no auth), returns `{"status":"healthy","engine":"Agathon-Sovereign"}`
+- `GET /healthz` — same survival payload (Railway / platform probes)
+
+Scan and identity routes still require `Authorization: Bearer <INTERNAL_SCAN_TOKEN>`.
 
 **Canonical repository:** [github.com/valosd453-bit/AI-red-team](https://github.com/valosd453-bit/AI-red-team)
 

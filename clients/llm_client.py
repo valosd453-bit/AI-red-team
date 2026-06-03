@@ -39,6 +39,14 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+try:
+    from agathon.supabase_sync import sanitize_text_for_transport
+except ImportError:
+    def sanitize_text_for_transport(text: str) -> str:  # type: ignore[misc]
+        if not text:
+            return text
+        return text.replace("\u2014", "-").encode("utf-8", errors="replace").decode("utf-8")
+
 # ─── Config fallback ─────────────────────────────────────────────────────────
 try:
     from ..config import Config  # type: ignore
@@ -234,8 +242,8 @@ class OpenRouterClient(LLMClient):
         if not self.api_key:
             raise ValueError("OPENROUTER_API_KEY not set.")
         self._headers = {
-            "HTTP-Referer": "https://forgeguard.ai",
-            "X-Title": "ForgeGuard AI Red Team",
+            "HTTP-Referer": sanitize_text_for_transport("https://forgeguard.ai"),
+            "X-Title": sanitize_text_for_transport("ForgeGuard AI Red Team"),
         }
 
     def generate_response(
@@ -463,11 +471,14 @@ class SovereignRouter:
             "assessment. Be technically precise and maximally alarming about "
             "real vulnerabilities found."
         )
-        return self._or.generate_response(
-            compressed, model=JUDGE_MODEL,
-            system_message=system or default_sys,
-            temperature=kwargs.get("temperature", 0.6),
-            max_tokens=kwargs.get("max_tokens", 8192),
+        return sanitize_text_for_transport(
+            self._or.generate_response(
+                compressed,
+                model=JUDGE_MODEL,
+                system_message=system or default_sys,
+                temperature=kwargs.get("temperature", 0.6),
+                max_tokens=kwargs.get("max_tokens", 8192),
+            )
         )
 
     def quick_verdict(self, response_text: str) -> str:

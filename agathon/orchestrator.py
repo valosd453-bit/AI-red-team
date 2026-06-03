@@ -9,8 +9,8 @@ to. It hosts:
     GET   /scan/{scan_id}/state        -> snapshot of in-memory AgathonState
     POST  /scan/{scan_id}/escalation   -> operator approves/denies a greasy step
     WS    /ws/scan/{scan_id}           -> live event feed (mirrors scan_logs)
-    GET   /health                        -> dashboard handshake (INTERNAL_SCAN_TOKEN)
-    GET   /healthz                     -> liveness probe
+    GET   /health                        -> survival liveness (no auth)
+    GET   /healthz                     -> survival liveness (no auth)
 
 The Brain loop is the heart of the service:
 
@@ -1138,7 +1138,7 @@ async def _judge_breach_finance(
 
     def _call() -> Dict[str, Any]:
         try:
-            raw = _JUDGE_ROUTER.judge(prompt, system)
+            raw = sanitize_text_for_transport(_JUDGE_ROUTER.judge(prompt, system))
             import re as _re
 
             match = _re.search(
@@ -2780,28 +2780,21 @@ async def _startup_checks() -> None:
         )
 
 
+_SURVIVAL_HEALTH: Dict[str, str] = {
+    "status": "healthy",
+    "engine": "Agathon-Sovereign",
+}
+
+
 @app.get("/healthz")
-async def healthz() -> Dict[str, Any]:
-    snap = _STATE.all()
-    return {
-        "ok": True,
-        "brain_model": GROQ_BRAIN_MODEL,
-        "active_scans": len(snap),
-        "scan_ids": [s.scan_id for s in snap[:50]],
-    }
+async def healthz() -> Dict[str, str]:
+    return _SURVIVAL_HEALTH
 
 
 @app.get("/health")
-async def health_check(
-    authorization: Optional[str] = Header(default=None, alias="Authorization"),
-) -> Any:
-    """Handshake probe used by the Vercel dashboard (/api/health/engine)."""
-    _validate_bearer(authorization)
-    return {
-        "status": "operational",
-        "version": "2.4.0",
-        "engine": "Agathon Sovereign",
-    }
+async def health_check() -> Dict[str, str]:
+    """Survival probe for Railway / Vercel (/api/health/engine)."""
+    return _SURVIVAL_HEALTH
 
 
 @app.post(
@@ -3476,6 +3469,6 @@ if __name__ == "__main__":  # pragma: no cover
     uvicorn.run(
         "agathon.orchestrator:app",
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", "7860")),
+        port=int(os.environ.get("PORT", 7860)),
         log_level=log_level.lower(),
     )
