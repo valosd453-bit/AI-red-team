@@ -144,13 +144,43 @@ def _is_probe_class(obj: Any, module_name: str) -> bool:
         return bool(re.match(r"^[A-Z][A-Za-z0-9_]+$", name))
 
 
-def discover_garak_probes() -> List[GarakProbeSpec]:
+def _runtime_keys_present() -> bool:
+    import os
+
+    return any(os.environ.get(k, "").strip() for k in _RUNTIME_KEY_VARS)
+
+
+def _sync_runtime_env_for_garak(env: Optional[Dict[str, str]] = None) -> None:
+    """
+    Push runtime LLM keys into os.environ before Garak probe imports.
+
+    Some garak.probes submodules read API keys at import time; passing an
+    explicit env snapshot ensures discovery sees the live bunker credentials.
+    """
+    import os
+
+    source: Dict[str, str] = dict(env) if env is not None else dict(os.environ)
+    for key in _RUNTIME_KEY_VARS:
+        val = (source.get(key) or os.environ.get(key) or "").strip()
+        if val:
+            os.environ[key] = val
+    for key, val in source.items():
+        if key.startswith("GARAK_") and val:
+            os.environ.setdefault(key, val)
+
+
+def discover_garak_probes(
+    env: Optional[Dict[str, str]] = None,
+) -> List[GarakProbeSpec]:
     """
     Walk ``garak.probes`` and collect concrete Probe subclasses.
 
     Returns an empty list when garak is not installed; callers fall back to
     the four legacy garak.* catalogue entries.
     """
+    import os
+
+    _sync_runtime_env_for_garak(env or dict(os.environ))
     specs: List[GarakProbeSpec] = []
     try:
         import garak.probes as probes_root  # type: ignore
@@ -195,9 +225,9 @@ def discover_garak_probes() -> List[GarakProbeSpec]:
     return specs
 
 
-def probe_count(*, log: bool = True) -> int:
+def probe_count(*, log: bool = True, env: Optional[Dict[str, str]] = None) -> int:
     """Return number of discoverable Garak probe specs (for health checks)."""
-    specs = discover_garak_probes()
+    specs = discover_garak_probes(env=env)
     n = len(specs)
     if log:
         msg = f"[registry] Cold-start probes detected: {n}"
@@ -217,11 +247,15 @@ def hot_reload_garak_catalog() -> int:
     Evict failed garak.probes imports and re-discover the full arsenal.
     Triggered on first scan start when the bunker is live.
     """
+    import os
     import sys
+
+    runtime_env = dict(os.environ)
+    _sync_runtime_env_for_garak(runtime_env)
 
     evicted = 0
     for mod_name in list(sys.modules):
-        if mod_name.startswith("garak.probes."):
+        if mod_name == "garak.probes" or mod_name.startswith("garak.probes."):
             del sys.modules[mod_name]
             evicted += 1
     if evicted:
@@ -230,7 +264,7 @@ def hot_reload_garak_catalog() -> int:
     from forgeguard_bridge import reload_garak_heavy_registry
 
     added, registry_size = reload_garak_heavy_registry()
-    n = probe_count(log=False)
+    n = probe_count(log=False, env=runtime_env)
     msg = (
         f"[registry] Hot reload probes detected: {n} "
         f"(registry={registry_size}, added={added}, target {RUNTIME_TARGET_PROBES}+)"

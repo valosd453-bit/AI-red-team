@@ -232,6 +232,11 @@ _groq_client = None  # module-level singleton
 # burns through the limit in seconds and causes cascading 429 retry storms.
 _groq_semaphore = None
 
+SOVEREIGN_PROBE_DELAY_S = 5.0
+THROTTLE_SYSTEM_MESSAGE = (
+    "[SYSTEM] Groq Throttling detected. Slowing down strike battery..."
+)
+
 
 def _get_groq_semaphore():
     """Return the module-level Groq concurrency semaphore (created lazily)."""
@@ -239,6 +244,40 @@ def _get_groq_semaphore():
     if _groq_semaphore is None:
         _groq_semaphore = asyncio.Semaphore(1)
     return _groq_semaphore
+
+
+def _is_sovereign_scan(state: "AgathonState") -> bool:
+    return bool(getattr(state, "ownership_verified", False))
+
+
+def _is_rate_limited_response(text: str) -> bool:
+    t = (text or "").lower()
+    return (
+        "[http-429]" in t
+        or "429" in t
+        or "rate limit" in t
+        or "too many requests" in t
+    )
+
+
+async def _emit_throttle_log(state: "AgathonState", *, detail: str = "") -> None:
+    await _emit_scan_log(
+        state,
+        log_type="info",
+        severity="info",
+        attack_name="system_throttle",
+        payload={
+            "type": "throttle",
+            "message": THROTTLE_SYSTEM_MESSAGE,
+            "detail": (detail or "")[:400],
+        },
+    )
+
+
+async def _sovereign_probe_pause(state: "AgathonState") -> None:
+    """Fixed 5s gap between kinetic probes for Sovereign operators."""
+    if _is_sovereign_scan(state):
+        await asyncio.sleep(SOVEREIGN_PROBE_DELAY_S)
 
 
 def _get_groq_client():
@@ -1490,6 +1529,9 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
                     detail=str(kinetic_result.payload.get("response_excerpt", "")),
                 )
                 return
+            excerpt = str((kinetic_result.payload or {}).get("response_excerpt", ""))
+            if _is_rate_limited_response(excerpt):
+                await _emit_throttle_log(state, detail=excerpt[:400])
             await _apply_kinetic_result(
                 state,
                 name=strike_name,
@@ -1497,6 +1539,7 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
                 rationale="mandatory kinetic battery",
                 result=kinetic_result,
             )
+            await _sovereign_probe_pause(state)
         except ProviderHandshakeError as e:
             log.critical(HANDSHAKE_ABORT_MESSAGE)
             await _handle_target_auth_failure(state, detail=str(e))
@@ -2087,8 +2130,11 @@ async def _brain_loop(state: AgathonState) -> None:
                     or type(e).__name__ in ("RateLimitError", "TooManyRequestsError")
                 )
                 if is_rate_limit and _attempt < _MAX_RETRIES:
-                    # Exponential backoff with ±20% jitter
+                    await _emit_throttle_log(state, detail=str(e)[:400])
+                    # Exponential backoff with ±20% jitter (floor 5s for Sovereign)
                     delay = min(_BACKOFF_CAP, _BACKOFF_BASE * (2 ** _attempt))
+                    if _is_sovereign_scan(state):
+                        delay = max(SOVEREIGN_PROBE_DELAY_S, delay)
                     jitter = delay * 0.2 * (2 * _random.random() - 1)
                     wait = delay + jitter
                     log.warning(
@@ -2691,9 +2737,11 @@ async def run_scan(state: AgathonState) -> None:
     global _HOT_RELOAD_DONE
     if not _HOT_RELOAD_DONE:
         try:
-            from .garak_catalog import hot_reload_garak_catalog
+            from . import kinetic_strike
+            from .garak_catalog import get_kinetic_battery_strikes, hot_reload_garak_catalog
 
             hot_reload_garak_catalog()
+            kinetic_strike.KINETIC_BATTERY = get_kinetic_battery_strikes()
             _HOT_RELOAD_DONE = True
         except Exception as exc:  # noqa: BLE001
             log.warning("[registry] hot reload on first scan skipped: %s", exc)

@@ -252,3 +252,19 @@ class BaseTester:
     def log_error(self, error: Exception):
         """Log an attack error."""
         self.logger.error(f"Attack error in {self.attack_name}: {error}", exc_info=True)
+
+    @staticmethod
+    def is_rate_limited_response(response: str) -> bool:
+        """True when target or brain returned HTTP 429 / rate-limit text."""
+        text = (response or "").lower()
+        return (
+            "[http-429]" in text
+            or "429" in text
+            or "rate limit" in text
+            or "too many requests" in text
+        )
+
+    @staticmethod
+    def sovereign_probe_delay_seconds() -> float:
+        """Fixed inter-probe delay for Sovereign operators (trial lockout guard)."""
+        return 5.0

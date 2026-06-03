@@ -27,6 +27,8 @@ HANDSHAKE_ABORT_MESSAGE = KEY_PROVIDER_MISMATCH
 
 STRICT_PAYLOAD_KEYS = frozenset({"model", "messages", "temperature", "max_tokens"})
 
+SOVEREIGN_STRIKE_BACKOFF_S = 5.0
+
 _ENGINE_KEY_ENVS = (
     "GROQ_API_KEY",
     "OPENROUTER_API_KEY",
@@ -243,7 +245,10 @@ class WeaponLLMClient:
                 return f"[transport-error] {type(e).__name__}: {e}"
 
             if r.status_code in (429, 503) and attempt < max_attempts - 1:
-                delay = min(cap_delay, base_delay * (2 ** attempt))
+                delay = max(
+                    SOVEREIGN_STRIKE_BACKOFF_S,
+                    min(cap_delay, base_delay * (2 ** attempt)),
+                )
                 delay += random.uniform(0, delay * 0.2)
                 time.sleep(delay)
                 continue
