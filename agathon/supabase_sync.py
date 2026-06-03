@@ -74,7 +74,7 @@ def sanitize_text_for_transport(text: str) -> str:
         return text
     for old, new in _DASH_REPLACEMENTS + _SMART_QUOTE_REPLACEMENTS:
         text = text.replace(old, new)
-    return text.encode("utf-8", errors="replace").decode("utf-8")
+    return text.encode("ascii", "ignore").decode("ascii")
 
 
 def sanitize_payload_strings(value: Any) -> Any:

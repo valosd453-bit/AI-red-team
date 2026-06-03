@@ -45,7 +45,11 @@ except ImportError:
     def sanitize_text_for_transport(text: str) -> str:  # type: ignore[misc]
         if not text:
             return text
-        return text.replace("\u2014", "-").encode("utf-8", errors="replace").decode("utf-8")
+        return (
+            text.replace("\u2014", "-")
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
 
 # ─── Config fallback ─────────────────────────────────────────────────────────
 try:
