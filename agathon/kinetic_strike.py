@@ -288,6 +288,7 @@ async def run_kinetic_strike(
         base_url=state.target_url,
         api_key=state.api_key,
         model=state.target_model,
+        target_provider=state.target_provider,
     )
 
     def _fire() -> TargetStrikeResult:

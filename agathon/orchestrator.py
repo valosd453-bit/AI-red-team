@@ -2769,6 +2769,13 @@ app = FastAPI(title="Agathon Orchestrator", version="0.2.0")
 
 @app.on_event("startup")
 async def _startup_checks() -> None:
+    from forgeguard_bridge import REGISTRY
+
+    print(f"[registry] Garak heavy arsenal: {len(REGISTRY)} dynamic probes loaded.")
+    log.info(
+        "[registry] Garak heavy arsenal: %d dynamic probes loaded",
+        len(REGISTRY),
+    )
     if not _resolve_internal_token():
         log.warning(
             "INTERNAL_SCAN_TOKEN (or AGATHON_INTERNAL_SECRET) not set — "
@@ -3469,6 +3476,6 @@ if __name__ == "__main__":  # pragma: no cover
     uvicorn.run(
         "agathon.orchestrator:app",
         host="0.0.0.0",
-        port=7860,
+        port=int(os.environ.get("PORT", 7860)),
         log_level=log_level.lower(),
     )

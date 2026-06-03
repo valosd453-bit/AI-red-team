@@ -101,9 +101,27 @@ def assert_target_key_isolation(
         )
 
 
+def _require_user_scan_key(api_key: str) -> str:
+    """
+    Scan-form key only — never substitute GROQ_API_KEY or other engine secrets.
+    """
+    key = (api_key or "").strip()
+    if not key:
+        raise ValueError("Target API key is empty — provide the key from the scan form.")
+    for env_name in _ENGINE_KEY_ENVS:
+        env_val = (os.environ.get(env_name) or "").strip()
+        if env_val and key == env_val:
+            log.debug(
+                "[target] scan key matches engine env %s — isolation check follows",
+                env_name,
+            )
+            break
+    return key
+
+
 def build_target_authorization(api_key: str, target_provider: str = "") -> str:
     """Bearer header for target chat/completions — UI key only."""
-    key = (api_key or "").strip()
+    key = _require_user_scan_key(api_key)
     provider = (target_provider or "").lower()
     if provider in ("openai", "openai_compat", "groq", "anthropic", ""):
         return f"Bearer {key}"
@@ -121,12 +139,13 @@ def build_target_client(
 ) -> OpenAICompatibleClient:
     """Factory for kinetic weapon HTTP — validates isolation before firing."""
     provider = resolve_target_provider(base_url, target_provider)
+    scan_key = _require_user_scan_key(api_key)
     assert_target_key_isolation(
-        api_key, target_url=base_url, target_provider=provider
+        scan_key, target_url=base_url, target_provider=provider
     )
     client = OpenAICompatibleClient(
         base_url=base_url,
-        api_key=api_key.strip(),
+        api_key=scan_key,
         model=model,
         timeout=timeout,
         max_tokens=max_tokens,
