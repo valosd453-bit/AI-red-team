@@ -892,7 +892,9 @@ async def _emit_scan_report(
 
     # Map our internal severity values onto the migration's CHECK constraint.
     risk_label = (report.get("overall_severity") or "NONE").upper()
-    if risk_label not in {"NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+    if risk_label in {"INFO", "INFORMATIONAL"}:
+        risk_label = "LOW"
+    elif risk_label not in {"NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"}:
         risk_label = "NONE"
 
     liability_sum = sum(
@@ -949,7 +951,7 @@ async def _emit_scan_report(
         "generation_cost_usd": round(state.cost_usd, 4),
         "financial_liability_usd": round(liability_sum, 2) if liability_sum > 0 else None,
         "ale_usd": round(liability_sum, 2) if liability_sum > 0 else report.get("ale_usd"),
-        "attacks_run": float(state.attacks_run),
+        "attacks_run": float(int(round(state.attacks_run or 0))),
     }
 
     try:
@@ -2078,6 +2080,7 @@ async def _target_preflight(state: AgathonState) -> bool:
             "key_mask": _mask_key(state.api_key),
         },
     )
+    await _bump_progress(state, 3, phase="preflight_start")
     probe = await asyncio.to_thread(_probe)
     if KEY_PROVIDER_MISMATCH in probe:
         await _handle_target_auth_failure(state, detail=probe[:800])
@@ -3060,12 +3063,21 @@ async def run_scan(state: AgathonState) -> None:
         scan_patch["failure_reason"] = failure_reason
     await _update_scan_row(state, **scan_patch)
 
-    with suppress(Exception):
+    try:
         await _notify_agathon_webhook(
             state,
             final_status=final_status,
             failure_reason=failure_reason,
             report=report,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.error("agathon webhook notify failed: %s", e)
+        await _emit_scan_log(
+            state,
+            log_type="info",
+            severity="high",
+            attack_name="webhook_notify_failed",
+            payload={"message": str(e)[:400]},
         )
     await _emit_scan_log(
         state, log_type="audit", severity="info",
@@ -3179,8 +3191,8 @@ async def _notify_agathon_webhook(
         },
     }
 
-    def _post() -> None:
-        _requests.post(
+    def _post() -> tuple[int, str]:
+        resp = _requests.post(
             callback,
             json=payload,
             headers={
@@ -3189,8 +3201,48 @@ async def _notify_agathon_webhook(
             },
             timeout=10,
         )
+        return resp.status_code, (resp.text or "")[:400]
 
-    await asyncio.to_thread(_post)
+    status_code, body_snippet = await asyncio.to_thread(_post)
+    persist_ok = False
+    persist_error: Optional[str] = None
+    try:
+        import json as _json
+
+        body_json = _json.loads(body_snippet) if body_snippet.strip().startswith("{") else {}
+        persist_ok = bool(body_json.get("persist_ok"))
+        persist_error = body_json.get("persist_error")
+    except Exception:  # noqa: BLE001
+        pass
+
+    await _emit_scan_log(
+        state,
+        log_type="webhook",
+        severity="info" if 200 <= status_code < 300 else "high",
+        attack_name="webhook_callback",
+        payload={
+            "message": f"ForgeGuard webhook POST HTTP {status_code}",
+            "status_code": status_code,
+            "persist_ok": persist_ok,
+            "persist_error": persist_error,
+            "body": body_snippet,
+            "callback_host": callback.split("/")[2] if "://" in callback else callback,
+        },
+    )
+    # #region agent log
+    _agent_debug(
+        "F3",
+        "orchestrator.py:_notify_agathon_webhook",
+        "webhook_post_result",
+        {
+            "scan_id": state.scan_id,
+            "status_code": status_code,
+            "persist_ok": persist_ok,
+            "persist_error": persist_error,
+        },
+        run_id="post-fix",
+    )
+    # #endregion
 
 
 async def _record_usage_events(state: AgathonState) -> None:
