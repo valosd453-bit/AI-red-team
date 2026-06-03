@@ -1,22 +1,42 @@
-"""WEB_APP surface — Playwright XSS / SQLi scout skeleton."""
+"""WEB APPLICATION — Logic Discovery + XSS Vector Scout."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, TYPE_CHECKING
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+import re
+from typing import Any, Dict, List, Set, TYPE_CHECKING
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 if TYPE_CHECKING:
     from agathon.orchestrator import AgathonState
 
 logger = logging.getLogger(__name__)
 
-_XSS_CANARY = '<script>fg_xss_canary</script>'
+_XSS_CANARY = "<script>fg_xss_canary</script>"
 _SQLI_PAYLOADS = ("' OR '1'='1", "1; DROP TABLE users--", "' UNION SELECT NULL--")
+_HIDDEN_PATHS = (
+    "/admin",
+    "/api",
+    "/debug",
+    "/health",
+    "/swagger",
+    "/graphql",
+    "/.env",
+    "/api/v1",
+    "/internal",
+)
+_HREF_RE = re.compile(r"""href\s*=\s*['"]([^'"]+)['"]""", re.I)
+_FORM_RE = re.compile(r"""action\s*=\s*['"]([^'"]+)['"]""", re.I)
+_FETCH_RE = re.compile(r"""fetch\s*\(\s*['"]([^'"]+)['"]""", re.I)
 
 
-async def _playwright_scout(url: str) -> List[Dict[str, Any]]:
+async def _logic_discovery(
+    url: str,
+    auth_header: str,
+) -> List[Dict[str, Any]]:
     findings: List[Dict[str, Any]] = []
+    discovered: Set[str] = set()
+
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -24,26 +44,73 @@ async def _playwright_scout(url: str) -> List[Dict[str, Any]]:
         return findings
 
     parsed = urlparse(url)
-    base_query = parse_qs(parsed.query)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context()
+        extra = {"Authorization": auth_header} if auth_header else {}
+        context = await browser.new_context(extra_http_headers=extra)
         page = await context.new_page()
 
         try:
-            resp = await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-            status = resp.status if resp else 0
+            await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
             html = await page.content()
-            findings.append(
-                {
-                    "probe": "baseline_fetch",
-                    "success": status >= 500,
-                    "severity": "medium" if status >= 500 else "info",
-                    "evidence": f"HTTP {status}, body_len={len(html)}",
-                }
-            )
+            for pattern in (_HREF_RE, _FORM_RE, _FETCH_RE):
+                for match in pattern.findall(html):
+                    if match.startswith("/") or match.startswith("http"):
+                        discovered.add(urljoin(origin, match))
 
+            for hidden in _HIDDEN_PATHS:
+                test_url = urljoin(origin, hidden)
+                try:
+                    resp = await page.goto(
+                        test_url, wait_until="domcontentloaded", timeout=10_000
+                    )
+                    status = resp.status if resp else 0
+                    if status not in (404, 410):
+                        discovered.add(test_url)
+                        findings.append(
+                            {
+                                "probe": "logic_discovery_hidden_route",
+                                "success": status == 200,
+                                "severity": "medium" if status == 200 else "info",
+                                "evidence": f"GET {test_url} -> HTTP {status}",
+                            }
+                        )
+                except Exception:  # noqa: BLE001
+                    continue
+
+            if discovered:
+                findings.append(
+                    {
+                        "probe": "logic_discovery_crawl",
+                        "success": len(discovered) > 3,
+                        "severity": "medium" if len(discovered) > 5 else "info",
+                        "evidence": f"routes={list(discovered)[:20]}",
+                    }
+                )
+        finally:
+            await browser.close()
+
+    return findings
+
+
+async def _xss_sqli_scout(url: str, auth_header: str) -> List[Dict[str, Any]]:
+    findings: List[Dict[str, Any]] = []
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return findings
+
+    parsed = urlparse(url)
+    base_query = parse_qs(parsed.query)
+    extra = {"Authorization": auth_header} if auth_header else {}
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(extra_http_headers=extra)
+        page = await context.new_page()
+        try:
             for payload in _SQLI_PAYLOADS:
                 q = dict(base_query)
                 q.setdefault("q", [payload])
@@ -59,7 +126,7 @@ async def _playwright_scout(url: str) -> List[Dict[str, Any]]:
                     )
                     findings.append(
                         {
-                            "probe": "sqli_param_fuzz",
+                            "probe": "xss_sqli_scout",
                             "success": sqli_hit,
                             "severity": "high" if sqli_hit else "info",
                             "evidence": f"payload={payload[:40]} status={r.status if r else 0}",
@@ -68,7 +135,7 @@ async def _playwright_scout(url: str) -> List[Dict[str, Any]]:
                 except Exception as exc:  # noqa: BLE001
                     findings.append(
                         {
-                            "probe": "sqli_param_fuzz",
+                            "probe": "xss_sqli_scout",
                             "success": False,
                             "severity": "info",
                             "evidence": str(exc)[:200],
@@ -78,27 +145,17 @@ async def _playwright_scout(url: str) -> List[Dict[str, Any]]:
             xss_q = dict(base_query)
             xss_q.setdefault("search", [_XSS_CANARY])
             xss_url = urlunparse(parsed._replace(query=urlencode(xss_q, doseq=True)))
-            try:
-                await page.goto(xss_url, wait_until="domcontentloaded", timeout=15_000)
-                xss_html = await page.content()
-                reflected = _XSS_CANARY in xss_html
-                findings.append(
-                    {
-                        "probe": "xss_reflection_scout",
-                        "success": reflected,
-                        "severity": "high" if reflected else "info",
-                        "evidence": "canary reflected in DOM" if reflected else "no reflection",
-                    }
-                )
-            except Exception as exc:  # noqa: BLE001
-                findings.append(
-                    {
-                        "probe": "xss_reflection_scout",
-                        "success": False,
-                        "severity": "info",
-                        "evidence": str(exc)[:200],
-                    }
-                )
+            await page.goto(xss_url, wait_until="domcontentloaded", timeout=15_000)
+            xss_html = await page.content()
+            reflected = _XSS_CANARY in xss_html
+            findings.append(
+                {
+                    "probe": "xss_vector_scout",
+                    "success": reflected,
+                    "severity": "high" if reflected else "info",
+                    "evidence": "canary reflected in DOM" if reflected else "no reflection",
+                }
+            )
         finally:
             await browser.close()
 
@@ -106,9 +163,23 @@ async def _playwright_scout(url: str) -> List[Dict[str, Any]]:
 
 
 async def run_web_app_probes(state: "AgathonState") -> List[Dict[str, Any]]:
-    """Playwright XSS/SQLi scout against the scan target URL."""
+    """Playwright logic discovery + XSS/SQLi scout with Bearer auth."""
+    from agathon.target_client import build_universal_client
+
     url = state.target_url
     if not url.startswith("http"):
         url = f"https://{url}"
-    raw = await _playwright_scout(url)
-    return [{**f, "surface": "WEB_APP"} for f in raw]
+
+    utc = build_universal_client(
+        target_url=url,
+        target_api_key=state.api_key,
+        model=state.target_model,
+        target_provider=state.target_provider,
+    )
+    auth = utc.authorization_header()
+
+    raw: List[Dict[str, Any]] = []
+    raw.extend(await _logic_discovery(url, auth))
+    raw.extend(await _xss_sqli_scout(url, auth))
+
+    return [{**f, "surface": "WEB APPLICATION", "vector": "WEB_APP"} for f in raw]

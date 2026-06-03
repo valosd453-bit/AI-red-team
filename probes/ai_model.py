@@ -1,4 +1,4 @@
-"""AI_MODEL surface — Garak + PyRIT probe delegation."""
+"""AI_MODEL / LLM ENDPOINT — Garak + PyRIT prompt hijacking and jailbreak strikes."""
 
 from __future__ import annotations
 
@@ -6,23 +6,26 @@ import logging
 from typing import Any, Dict, List, TYPE_CHECKING
 
 from agathon.garak_catalog import get_kinetic_battery_strikes
-from agathon.target_client import build_target_client
+from agathon.target_client import build_universal_client
 
 if TYPE_CHECKING:
     from agathon.orchestrator import AgathonState
 
 logger = logging.getLogger(__name__)
 
+_PRIORITY = frozenset({"prompt_injection", "jailbreak", "pii_leak"})
+
 
 async def run_ai_model_probes(state: "AgathonState") -> List[Dict[str, Any]]:
-    """Run representative Garak/PyRIT probes against the LLM target."""
+    """Run Garak/PyRIT probes against the LLM target via universal client."""
     findings: List[Dict[str, Any]] = []
-    client = build_target_client(
-        base_url=state.target_url,
-        api_key=state.api_key,
+    utc = build_universal_client(
+        target_url=state.target_url,
+        target_api_key=state.api_key,
         model=state.target_model,
         target_provider=state.target_provider,
     )
+    llm_client = utc._llm()
 
     try:
         from probes.garak import run_garak_probe
@@ -31,13 +34,18 @@ async def run_ai_model_probes(state: "AgathonState") -> List[Dict[str, Any]]:
         logger.warning("[ai_model] probe imports unavailable")
         return findings
 
-    strikes = get_kinetic_battery_strikes()[:6]
+    strikes = [
+        s for s in get_kinetic_battery_strikes() if s[1] in _PRIORITY
+    ][:8]
+    if not strikes:
+        strikes = get_kinetic_battery_strikes()[:6]
+
     for registry_name, category in strikes:
         try:
             parts = registry_name.split(".")
             if len(parts) >= 3:
                 result = run_garak_probe(
-                    client,
+                    llm_client,
                     state.target_model,
                     probe_module=parts[1],
                     probe_class=parts[2],
@@ -46,7 +54,7 @@ async def run_ai_model_probes(state: "AgathonState") -> List[Dict[str, Any]]:
                 )
             else:
                 result = run_garak_probe(
-                    client,
+                    llm_client,
                     state.target_model,
                     probe_module=category.replace("_", ""),
                     probe_class="InjectMarkup",
@@ -55,7 +63,8 @@ async def run_ai_model_probes(state: "AgathonState") -> List[Dict[str, Any]]:
                 )
             findings.append(
                 {
-                    "surface": "AI_MODEL",
+                    "surface": "LLM ENDPOINT",
+                    "vector": "AI_MODEL",
                     "probe": registry_name,
                     "category": category,
                     "success": bool(getattr(result, "success", False)),
@@ -69,13 +78,14 @@ async def run_ai_model_probes(state: "AgathonState") -> List[Dict[str, Any]]:
     for spec in PYRIT_SCENARIOS[:2]:
         try:
             result = run_pyrit_probe(
-                client,
+                llm_client,
                 registry_name=spec["name"],
                 category=spec["category"],
             )
             findings.append(
                 {
-                    "surface": "AI_MODEL",
+                    "surface": "LLM ENDPOINT",
+                    "vector": "AI_MODEL",
                     "probe": spec["name"],
                     "category": spec["category"],
                     "success": bool(getattr(result, "success", False)),

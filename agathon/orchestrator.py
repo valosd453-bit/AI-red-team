@@ -447,6 +447,7 @@ class AgathonState:
     ownership_verified: bool = False
     surface_kind: str = "llm"
     target_provider: str = ""
+    asset_value_usd: float = 0.0
 
     # Run accounting -----------------------------------------------------------
     started_at: float = field(default_factory=time.time)
@@ -679,6 +680,54 @@ async def _emit_brain_transcript(
         log.error("brain_transcripts insert failed: %s", e)
 
 
+def _resolve_asset_value(state: AgathonState) -> float:
+    if state.asset_value_usd and state.asset_value_usd > 0:
+        return float(state.asset_value_usd)
+    from .financial_judge import asset_value_for_intensity
+
+    return asset_value_for_intensity(state.intensity.value)
+
+
+def _severity_rank(sev: str) -> int:
+    order = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
+    return order.get((sev or "info").lower(), 0)
+
+
+def _top_breach_finding(state: AgathonState) -> Dict[str, Any]:
+    """Return highest-severity successful finding for scan_reports rollup."""
+    candidates = [
+        f
+        for f in state.findings
+        if (f.get("payload") or {}).get("success")
+        or f.get("severity") in ("high", "critical", "medium")
+    ]
+    if not candidates:
+        return {}
+    candidates.sort(
+        key=lambda f: _severity_rank(str(f.get("severity", "info"))),
+        reverse=True,
+    )
+    top = candidates[0]
+    payload = top.get("payload") or {}
+    report = payload.get("kinetic_finding_report") or {}
+    return {
+        "executive_summary": report.get("executive_summary")
+        or payload.get("executive_summary")
+        or payload.get("summary")
+        or "",
+        "financial_liability_usd": payload.get("financial_liability_usd")
+        or top.get("financial_liability_usd"),
+        "technical_proof_of_concept": report.get("technical_proof_of_concept")
+        or payload.get("technical_proof_of_concept")
+        or payload.get("response_excerpt")
+        or "",
+        "remediation_code_snippet": report.get("remediation_code_snippet")
+        or payload.get("remediation_code_snippet")
+        or payload.get("remediation")
+        or "",
+    }
+
+
 async def _emit_scan_report(
     state: AgathonState, report: Dict[str, Any]
 ) -> None:
@@ -736,13 +785,25 @@ async def _emit_scan_report(
             + "\n".join(remediation_lines)
         )
 
+    top_breach = _top_breach_finding(state)
+    exec_summary = sanitize_text_for_transport(
+        top_breach.get("executive_summary")
+        or report.get("executive_summary", "")
+        or ""
+    )
+
     row = {
         "scan_id": state.scan_id,
         "generator_model": sanitize_text_for_transport(
             state.budget().brain_model or GROQ_BRAIN_MODEL
         ),
-        "executive_summary_md": sanitize_text_for_transport(
-            report.get("executive_summary", "") or ""
+        "executive_summary": exec_summary,
+        "executive_summary_md": exec_summary,
+        "technical_proof_of_concept": sanitize_text_for_transport(
+            str(top_breach.get("technical_proof_of_concept") or "")[:8000]
+        ),
+        "remediation_code_snippet": sanitize_text_for_transport(
+            str(top_breach.get("remediation_code_snippet") or "")[:8000]
         ),
         "audit_report_md": sanitize_text_for_transport(audit_md),
         "cvss_overall": float(report.get("overall_cvss", 0.0)),
@@ -1130,31 +1191,39 @@ async def _judge_breach_finance(
         return empty
     state.ale_judge_calls += 1
 
-    from .financial_judge import judge_with_router
+    from .financial_judge import judge_kinetic_finding
 
+    asset_val = _resolve_asset_value(state)
     prompt = (
         f"Attack: {attack_name}\nSeverity: {severity}\nCategory: {category}\n"
+        f"Asset value USD: {asset_val:,.0f}\n"
         f"Evidence: {summary[:600]}\n"
         f"Target response excerpt:\n{(target_response or summary)[:1200]}\n"
-        "Estimate records_leaked_estimate, operational_cost_usd, and financial_liability_usd."
+        "Produce executive_summary, financial_liability_usd, technical_proof_of_concept, "
+        "and remediation_code_snippet (Aegis regex/middleware)."
     )
 
     def _call() -> Dict[str, Any]:
-        report = judge_with_router(
+        kinetic = judge_kinetic_finding(
             prompt=prompt,
             category=category or attack_name,
             target_response=target_response or summary,
             judge_fn=lambda p, s: sanitize_text_for_transport(
                 _JUDGE_ROUTER.judge(p, s)
             ),
+            asset_value_usd=asset_val,
         )
         out = empty.copy()
-        if report.breach and report.total_liability_usd > 0:
-            out["financial_liability_usd"] = report.total_liability_usd
-            out["ale_usd"] = report.total_liability_usd
-        out["remediation"] = report.remediation
-        out["summary"] = sanitize_text_for_transport(report.summary)
-        out["financial_liability_report"] = report.to_dict()
+        if kinetic.breach and kinetic.financial_liability_usd > 0:
+            out["financial_liability_usd"] = kinetic.financial_liability_usd
+            out["ale_usd"] = kinetic.financial_liability_usd
+        out["remediation"] = kinetic.remediation_code_snippet
+        out["summary"] = sanitize_text_for_transport(kinetic.executive_summary)
+        out["executive_summary"] = kinetic.executive_summary
+        out["technical_proof_of_concept"] = kinetic.technical_proof_of_concept
+        out["remediation_code_snippet"] = kinetic.remediation_code_snippet
+        out["financial_liability_report"] = kinetic.to_dict()
+        out["kinetic_finding_report"] = kinetic.to_dict()
         return out
 
     return await asyncio.to_thread(_call)
@@ -1229,9 +1298,17 @@ async def _apply_kinetic_result(
             payload["ale_usd"] = finance.get("ale_usd")
             finding["financial_liability_usd"] = finance["financial_liability_usd"]
             finding["ale_usd"] = finance.get("ale_usd")
-        if finance.get("financial_liability_report"):
-            payload["financial_liability_report"] = finance["financial_liability_report"]
-            finding["financial_liability_report"] = finance["financial_liability_report"]
+        if finance.get("kinetic_finding_report"):
+            payload["kinetic_finding_report"] = finance["kinetic_finding_report"]
+        if finance.get("executive_summary"):
+            payload["executive_summary"] = finance["executive_summary"]
+            finding["executive_summary"] = finance["executive_summary"]
+        if finance.get("technical_proof_of_concept"):
+            payload["technical_proof_of_concept"] = finance["technical_proof_of_concept"]
+            finding["technical_proof_of_concept"] = finance["technical_proof_of_concept"]
+        if finance.get("remediation_code_snippet"):
+            payload["remediation_code_snippet"] = finance["remediation_code_snippet"]
+            finding["remediation_code_snippet"] = finance["remediation_code_snippet"]
         if finance.get("remediation"):
             payload["remediation"] = finance["remediation"]
         if finance.get("summary"):
@@ -1264,41 +1341,52 @@ async def _apply_kinetic_result(
     }
 
 
-async def _run_surface_probes(state: AgathonState) -> None:
-    """Run surface-kind probe vector (AI_MODEL / WEB_APP / API_GATEWAY / CHAT_BOT)."""
+_VECTOR_LABELS = {
+    "llm": "LLM ENDPOINT",
+    "web": "WEB APPLICATION",
+    "code": "API GATEWAY",
+    "mobile": "CHAT BOT",
+}
+
+
+async def _run_kinetic_vectors(state: AgathonState) -> None:
+    """Run kinetic strike vector for surface_kind (4 vector types)."""
     from probes import run_surface_probe
 
     kind = (state.surface_kind or "llm").strip().lower()
+    vector_label = _VECTOR_LABELS.get(kind, "LLM ENDPOINT")
     await _emit_scan_log(
         state,
         log_type="info",
         severity="info",
         payload={
-            "message": f"Surface probe vector starting: {kind}",
+            "message": f"Kinetic strike vector starting: {vector_label}",
             "surface_kind": kind,
+            "vector": vector_label,
         },
     )
     try:
         results = await run_surface_probe(kind, state)
     except Exception as exc:  # noqa: BLE001
-        log.warning("[surface] probe vector failed: %s", exc)
+        log.warning("[kinetic] vector failed: %s", exc)
         await _emit_scan_log(
             state,
             log_type="error",
             severity="medium",
-            payload={"message": f"Surface probe error: {exc}"},
+            payload={"message": f"Kinetic vector error: {exc}"},
         )
         return
 
     for item in results:
         sev = str(item.get("severity", "info"))
         success = bool(item.get("success"))
-        probe_name = str(item.get("probe", "surface_probe"))
+        probe_name = str(item.get("probe", "kinetic_probe"))
         payload = {
             "success": success,
-            "surface": item.get("surface", kind),
+            "surface": item.get("surface", vector_label),
+            "vector": item.get("vector", vector_label),
             "category": item.get("category", kind),
-            "summary": f"Surface probe {probe_name}: {'breach' if success else 'pass'}",
+            "summary": f"{vector_label} / {probe_name}: {'breach' if success else 'pass'}",
             "response_excerpt": str(item.get("evidence", ""))[:500],
         }
         if success and sev not in ("info",):
@@ -1313,8 +1401,14 @@ async def _run_surface_probes(state: AgathonState) -> None:
             if finance.get("financial_liability_usd"):
                 payload["financial_liability_usd"] = finance["financial_liability_usd"]
                 payload["ale_usd"] = finance.get("ale_usd")
-            if finance.get("financial_liability_report"):
-                payload["financial_liability_report"] = finance["financial_liability_report"]
+            if finance.get("executive_summary"):
+                payload["executive_summary"] = finance["executive_summary"]
+            if finance.get("technical_proof_of_concept"):
+                payload["technical_proof_of_concept"] = finance["technical_proof_of_concept"]
+            if finance.get("remediation_code_snippet"):
+                payload["remediation_code_snippet"] = finance["remediation_code_snippet"]
+            if finance.get("kinetic_finding_report"):
+                payload["kinetic_finding_report"] = finance["kinetic_finding_report"]
             if finance.get("remediation"):
                 payload["remediation"] = finance["remediation"]
 
@@ -1322,9 +1416,9 @@ async def _run_surface_probes(state: AgathonState) -> None:
         state.findings.append(
             {
                 "attack": probe_name,
-                "family": f"surface_{kind}",
+                "family": f"kinetic_{kind}",
                 "severity": sev,
-                "rationale": f"surface vector {kind}",
+                "rationale": f"kinetic vector {vector_label}",
                 "payload": payload,
                 "ts": time.time(),
             }
@@ -1342,10 +1436,15 @@ async def _run_surface_probes(state: AgathonState) -> None:
         log_type="info",
         severity="info",
         payload={
-            "message": f"Surface probe vector complete ({len(results)} probes)",
+            "message": f"Kinetic vector complete ({len(results)} probes) — {vector_label}",
             "surface_kind": kind,
         },
     )
+
+
+async def _run_surface_probes(state: AgathonState) -> None:
+    """Backward-compatible alias."""
+    await _run_kinetic_vectors(state)
 
 
 async def _run_kinetic_battery(state: AgathonState) -> None:
@@ -2601,7 +2700,7 @@ async def run_scan(state: AgathonState) -> None:
                     else (state.seal_reason or "preflight_failed")
                 )
             else:
-                await _run_surface_probes(state)
+                await _run_kinetic_vectors(state)
                 await _run_kinetic_battery(state)
                 await _brain_loop(state)
         else:
@@ -2613,7 +2712,7 @@ async def run_scan(state: AgathonState) -> None:
                 final_status = "failed"
                 failure_reason = str(e)
             else:
-                await _run_surface_probes(state)
+                await _run_kinetic_vectors(state)
                 state.sealed = True
                 state.seal_reason = f"surface_probe_complete:{state.surface_kind}"
         if not state.sealed and not state.cancelled:
@@ -2763,6 +2862,7 @@ async def _notify_agathon_webhook(
     if ale_usd is None and liability > 0:
         ale_usd = round(liability, 2)
 
+    top_breach = _top_breach_finding(state)
     payload = {
         "kind": "scan.completed",
         "scan_id": state.scan_id,
@@ -2773,6 +2873,11 @@ async def _notify_agathon_webhook(
             "attacks_run": state.attacks_run,
             "wall_seconds": int(state.wall_seconds()),
             "technical_report_md": technical_md,
+            "executive_summary": top_breach.get("executive_summary") or (
+                report.get("executive_summary") if report else None
+            ),
+            "technical_proof_of_concept": top_breach.get("technical_proof_of_concept"),
+            "remediation_code_snippet": top_breach.get("remediation_code_snippet"),
             "financial_liability_usd": str(ale_usd) if ale_usd is not None else None,
             "ale_usd": str(ale_usd) if ale_usd is not None else None,
             "overall_cvss": str(report.get("overall_cvss", 0)) if report else None,
@@ -2978,6 +3083,8 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
+    from .financial_judge import asset_value_for_intensity
+
     state = AgathonState(
         scan_id=req.scan_id,
         user_id=req.user_id,
@@ -2988,6 +3095,7 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
         ownership_verified=bool(req.ownership_verified),
         surface_kind=(req.surface_kind or "llm").strip() or "llm",
         target_provider=provider,
+        asset_value_usd=asset_value_for_intensity(req.intensity.value),
     )
     asyncio.create_task(run_scan(state))
     return StartScanResponse(
