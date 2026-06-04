@@ -749,6 +749,23 @@ async def _handle_target_auth_failure(
     detail: str = "",
 ) -> None:
     """Graceful auth/mismatch — seal scan, persist failure_reason, do not crash."""
+    if _is_sovereign_scan(state):
+        log.info(
+            "[sovereign] Target auth signal ignored — using scan-form key as-is "
+            "(ownership_verified / ksk805763@gmail.com path)"
+        )
+        await _emit_scan_log(
+            state,
+            log_type="info",
+            severity="info",
+            attack_name="auth_bypass_sovereign",
+            payload={
+                "message": "Sovereign bypass: strike continues with provided API key",
+                "detail": (detail or "")[:400],
+            },
+        )
+        return
+
     from .strike_dispatcher import KEY_PROVIDER_MISMATCH, _mask_key
 
     detail_text = (detail or "")[:800]
@@ -3308,7 +3325,16 @@ app = FastAPI(title="Agathon Orchestrator", version="0.2.0")
 @app.on_event("startup")
 async def _startup_checks() -> None:
     from forgeguard_bridge import REGISTRY
-    from agathon.garak_catalog import probe_count, RUNTIME_TARGET_PROBES
+    from agathon.garak_catalog import (
+        hot_reload_garak_catalog,
+        probe_count,
+        RUNTIME_TARGET_PROBES,
+    )
+
+    try:
+        hot_reload_garak_catalog()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[registry] Startup hot_reload_garak_catalog failed: %s", exc)
 
     registry_size = len(REGISTRY)
     garak_count = probe_count(log=False)

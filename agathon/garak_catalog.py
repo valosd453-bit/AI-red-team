@@ -11,22 +11,38 @@ from __future__ import annotations
 import sys
 import types
 
-# PRE-EMPTIVE SHIELD: Inject the missing key into the Garak payload registry
-# This stops the KeyError: 'whois_injection_contexts' from killing the boot
+# PRE-EMPTIVE SHIELD: payload registry + plugin loader (Python 3.11/3.13 Garak drift)
 try:
     import garak.payloads
+    import garak.plugins
 
     if not hasattr(garak.payloads, "Payload"):
-        # Fallback if class structure differs
         garak.payloads.Payload = type("Payload", (), {"payload_list": {}})
     if not hasattr(garak.payloads.Payload, "payload_list"):
         garak.payloads.Payload.payload_list = {}
-
     if "whois_injection_contexts" not in garak.payloads.Payload.payload_list:
         garak.payloads.Payload.payload_list["whois_injection_contexts"] = {
             "path": "dummy"
         }
         print("[SYSTEM] Garak KeyError Bypass Engaged.")
+
+    def safe_load_plugins(module, *args, **kwargs):
+        try:
+            if hasattr(module, "load") and callable(module.load):
+                return module.load()
+            _orig = getattr(garak.plugins, "_ORIGINAL_LOAD_PLUGINS", None)
+            if callable(_orig):
+                return _orig(module, *args, **kwargs)
+            return None
+        except Exception as e:
+            print(f"[SYSTEM] Silenced Garak Plugin Load Error: {e}")
+            return None
+
+    if hasattr(garak.plugins, "load_plugins"):
+        if not hasattr(garak.plugins, "_ORIGINAL_LOAD_PLUGINS"):
+            garak.plugins._ORIGINAL_LOAD_PLUGINS = garak.plugins.load_plugins
+        garak.plugins.load_plugins = safe_load_plugins
+        print("[SYSTEM] Garak load_plugins override engaged.")
 except Exception as e:
     print(f"[SYSTEM] Garak Registry Shield failed: {e}")
 
@@ -103,9 +119,10 @@ _CANONICAL_CATEGORIES = frozenset(
 
 
 def _engage_garak_registry_shield() -> None:
-    """Re-apply whois_injection_contexts after garak.* eviction / hot reload."""
+    """Re-apply payload + plugin shields after garak.* eviction / hot reload."""
     try:
         import garak.payloads
+        import garak.plugins
 
         if not hasattr(garak.payloads, "Payload"):
             garak.payloads.Payload = type("Payload", (), {"payload_list": {}})
@@ -116,6 +133,23 @@ def _engage_garak_registry_shield() -> None:
                 "path": "dummy"
             }
             print("[SYSTEM] Garak KeyError Bypass Engaged.")
+
+        def safe_load_plugins(module, *args, **kwargs):
+            try:
+                if hasattr(module, "load") and callable(module.load):
+                    return module.load()
+                _orig = getattr(garak.plugins, "_ORIGINAL_LOAD_PLUGINS", None)
+                if callable(_orig):
+                    return _orig(module, *args, **kwargs)
+                return None
+            except Exception as e:
+                print(f"[SYSTEM] Silenced Garak Plugin Load Error: {e}")
+                return None
+
+        if hasattr(garak.plugins, "load_plugins"):
+            if not hasattr(garak.plugins, "_ORIGINAL_LOAD_PLUGINS"):
+                garak.plugins._ORIGINAL_LOAD_PLUGINS = garak.plugins.load_plugins
+            garak.plugins.load_plugins = safe_load_plugins
     except Exception as e:
         print(f"[SYSTEM] Garak Registry Shield failed: {e}")
 

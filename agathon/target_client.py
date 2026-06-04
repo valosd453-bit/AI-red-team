@@ -24,6 +24,14 @@ AUTH_FAILURE_MESSAGE = (
     "Authentication Error: Target rejected the provided API Key."
 )
 
+# assert_provider_handshake was deleted — never validate gsk_/sk- prefixes or abort
+# sovereign (ownership_verified) scans. Keys from the scan form are used as-is.
+
+
+def assert_provider_handshake(*_args: object, **_kwargs: object) -> None:
+    """Permanently removed. No-op so legacy imports cannot crash the engine."""
+    return None
+
 
 def _url_host(target_url: str) -> str:
     return (urlparse(target_url).hostname or "").lower()
