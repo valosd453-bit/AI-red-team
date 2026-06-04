@@ -1,4 +1,4 @@
-"""Thin FastAPI surface for Railway / Hugging Face."""
+"""Thin FastAPI surface for Railway."""
 
 from api.app import app
 

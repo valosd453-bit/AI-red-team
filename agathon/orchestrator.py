@@ -89,12 +89,14 @@ from fastapi import (  # noqa: E402
     FastAPI,
     Header,
     HTTPException,
+    Request,
     WebSocket,
     WebSocketDisconnect,
     status,
 )
 from fastapi.responses import JSONResponse  # noqa: E402
-from pydantic import BaseModel, Field  # noqa: E402
+from pydantic import BaseModel, Field, ConfigDict, field_validator  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
 
 # First-party (Ai red/)
 # We reuse the bridge's primitives so the orchestrator and the simple-mode
@@ -3416,16 +3418,42 @@ class IdentityOcrRequest(BaseModel):
 
 
 class StartScanRequest(BaseModel):
+    """Payload from ForgeGuard /api/scan/start → Railway POST /scan/start."""
+
+    model_config = ConfigDict(extra="ignore")
+
     scan_id: str = Field(..., min_length=8)
     user_id: str = Field(..., min_length=8)
-    target_model: str
-    target_url: str
-    intensity: Intensity = Intensity.STANDARD
+    target_model: str = Field(default="gpt-4o-mini")
+    target_url: str = Field(..., min_length=8)
+    intensity: str = Field(default="standard")
     api_key: str = Field(..., min_length=1)
     ownership_verified: bool = False
-    surface_kind: str = "llm"
-    target_provider: str = ""
-    asset_value_usd: float = 0.0
+    surface_kind: str = Field(default="llm")
+    target_provider: str = Field(default="")
+    asset_value_usd: float = Field(default=50000.0)
+
+    @field_validator("intensity", mode="before")
+    @classmethod
+    def _normalize_intensity(cls, v: Any) -> str:
+        return str(v or "standard").strip().lower()
+
+    @field_validator("asset_value_usd", mode="before")
+    @classmethod
+    def _default_asset_value(cls, v: Any) -> float:
+        if v is None or v == "":
+            return 50000.0
+        try:
+            n = float(v)
+            return 50000.0 if n <= 0 else n
+        except (TypeError, ValueError):
+            return 50000.0
+
+    def resolved_intensity(self) -> Intensity:
+        try:
+            return Intensity(self.intensity)
+        except ValueError:
+            return Intensity.STANDARD
 
 
 class StartScanResponse(BaseModel):
@@ -3525,8 +3553,24 @@ async def identity_ocr(req: IdentityOcrRequest) -> Dict[str, Any]:
     dependencies=[Depends(_require_internal_secret)],
 )
 async def scan_start(req: StartScanRequest) -> StartScanResponse:
+    # #region agent log
+    _agent_debug(
+        "H1",
+        "orchestrator.py:scan_start",
+        "request_received",
+        {
+            "scan_id": req.scan_id,
+            "intensity": req.intensity,
+            "surface_kind": req.surface_kind,
+            "asset_value_usd": req.asset_value_usd,
+            "has_api_key": bool(req.api_key),
+        },
+    )
+    # #endregion
     if await _STATE.get(req.scan_id):
         raise HTTPException(status_code=409, detail="scan already running")
+
+    intensity = req.resolved_intensity()
 
     # SSRF guard — validate target URL before creating any state or tasks
     safe_url = _sanitize_target_url(req.target_url)
@@ -3541,24 +3585,34 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
         )
     except ProviderHandshakeError as e:
         log.critical(HANDSHAKE_ABORT_MESSAGE)
+        # #region agent log
+        _agent_debug(
+            "H2",
+            "orchestrator.py:scan_start",
+            "handshake_rejected",
+            {"scan_id": req.scan_id, "detail": str(e)[:200]},
+        )
+        # #endregion
         raise HTTPException(status_code=400, detail=str(e)) from e
     except ValueError as e:
+        # #region agent log
+        _agent_debug(
+            "H3",
+            "orchestrator.py:scan_start",
+            "validation_rejected",
+            {"scan_id": req.scan_id, "detail": str(e)[:200]},
+        )
+        # #endregion
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    from .financial_judge import asset_value_for_intensity
-
-    asset_val = (
-        float(req.asset_value_usd)
-        if req.asset_value_usd and req.asset_value_usd > 0
-        else asset_value_for_intensity(req.intensity.value)
-    )
+    asset_val = float(req.asset_value_usd) if req.asset_value_usd > 0 else 50000.0
 
     state = AgathonState(
         scan_id=req.scan_id,
         user_id=req.user_id,
         target_model=req.target_model,
         target_url=safe_url,
-        intensity=req.intensity,
+        intensity=intensity,
         api_key=req.api_key,
         ownership_verified=bool(req.ownership_verified),
         surface_kind=(req.surface_kind or "llm").strip() or "llm",
@@ -3567,7 +3621,7 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
     )
     asyncio.create_task(run_scan(state))
     return StartScanResponse(
-        accepted=True, scan_id=req.scan_id, intensity=req.intensity
+        accepted=True, scan_id=req.scan_id, intensity=intensity
     )
 
 
@@ -3662,6 +3716,24 @@ async def scan_ws(websocket: WebSocket, scan_id: str, token: str = "") -> None:
         pass
     finally:
         state.subscribers.discard(websocket)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    # #region agent log
+    _agent_debug(
+        "H4",
+        "orchestrator.py:scan_start",
+        "pydantic_validation_error",
+        {
+            "path": str(request.url.path),
+            "errors": exc.errors()[:8],
+        },
+    )
+    # #endregion
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
 @app.exception_handler(Exception)

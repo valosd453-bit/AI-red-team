@@ -1,7 +1,7 @@
 """
 Strike logic — target HTTP uses the scan-form API key only (Key Isolation).
 
-Re-exports from ``core.strike_logic`` for Railway/HF compatibility.
+Re-exports from ``core.strike_logic`` for Railway deployment compatibility.
 """
 
 from core.strike_logic import *  # noqa: F403

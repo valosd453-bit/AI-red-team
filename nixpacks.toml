@@ -1,13 +1,14 @@
 [phases.setup]
-nixPkgs = ['python311', 'gcc', 'git', 'libglvnd', 'libGL']
+nixPkgs = ["python311", "gcc", "git", "libglvnd", "libGL"]
 
 [phases.install]
 cmds = [
-  'python -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip',
-  '/opt/venv/bin/pip install -r requirements.txt',
-  'playwright install --with-deps chromium',
-  '/opt/venv/bin/python -c "import sys; sys.path.insert(0, \".\"); from agathon.garak_catalog import probe_count, COLD_START_MIN_PROBES; n=probe_count(); print(f\"garak_probes={n}\"); assert n >= COLD_START_MIN_PROBES, f\"expected {COLD_START_MIN_PROBES}+ got {n}\""',
+  "python -m venv /opt/venv",
+  "/opt/venv/bin/pip install --upgrade pip",
+  "/opt/venv/bin/pip install -r requirements.txt",
+  "/opt/venv/bin/python -m playwright install --with-deps chromium",
+  "/opt/venv/bin/python -c \"import sys; sys.path.insert(0, '.'); from agathon.garak_catalog import probe_count, COLD_START_MIN_PROBES; n=probe_count(); print(f'garak_probes={n}'); assert n >= COLD_START_MIN_PROBES, f'expected {COLD_START_MIN_PROBES}+ got {n}'\"",
 ]
 
 [start]
-cmd = 'uvicorn main:app --host 0.0.0.0 --port ${PORT:-7860}'
+cmd = "uvicorn main:app --host 0.0.0.0 --port $PORT"
