@@ -3,6 +3,8 @@ Weapon strike dispatcher — scan-form API key ONLY (Key Isolation Protocol).
 
 All target HTTP for OpenAI-compatible endpoints uses a strict 4-field JSON body.
 Brain credentials (GROQ_API_KEY, OPENROUTER_API_KEY) must never be used here.
+
+No ``assert_provider_handshake`` and no API-key prefix validation (``gsk_`` / ``sk-``).
 """
 
 from __future__ import annotations

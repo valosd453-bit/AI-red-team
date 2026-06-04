@@ -262,10 +262,7 @@ def _is_rate_limited_response(text: str) -> bool:
 
 
 def _is_groq_free_tier_strike(state: "AgathonState") -> bool:
-    """True when the scan-form target key is a Groq gsk_ key on Groq endpoints."""
-    key = (state.api_key or "").strip()
-    if not key.startswith("gsk_"):
-        return False
+    """True when the target URL resolves to Groq (rate-limit throttle only)."""
     url = (state.target_url or "").lower()
     provider = (
         (state.target_provider or provider_from_url(state.target_url, "") or "")
@@ -2054,6 +2051,20 @@ def _parse_tool_arguments(raw: Any) -> Dict[str, Any]:
 
 async def _target_preflight(state: AgathonState) -> bool:
     """Liveness probe against the user-supplied target API key."""
+    if _is_sovereign_scan(state):
+        await _emit_scan_log(
+            state,
+            log_type="audit",
+            severity="info",
+            attack_name="preflight",
+            payload={
+                "message": "Sovereign scan — preflight skipped (raw URL/key)",
+                "target_provider": state.target_provider
+                or resolve_target_provider(state.target_url, ""),
+            },
+        )
+        await _bump_progress(state, 5, phase="preflight_skipped_sovereign")
+        return True
 
     def _probe() -> str:
         client = build_weapon_client(
@@ -2113,7 +2124,7 @@ async def _target_preflight(state: AgathonState) -> bool:
                 "message": "Target liveness probe failed — check API key, URL, and model id.",
                 "detail": detail,
                 "failure_reason": reason,
-                "hint": "OpenAI: https://api.openai.com/v1 + sk-… key. Groq: https://api.groq.com/openai/v1 + gsk_…",
+                "hint": "Verify target URL, model id, and API key from the scan form.",
             },
         )
         state.sealed = True

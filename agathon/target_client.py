@@ -3,6 +3,9 @@ Target HTTP client — UI scan key ONLY (Operation: Key Isolation).
 
 Universal Bearer-authenticated HTTP for all four kinetic strike vectors.
 Brain/strategy uses GROQ_API_KEY / OPENROUTER_API_KEY via clients/llm_client.py.
+
+Handshake policy: ``assert_provider_handshake`` was permanently removed.
+Scan-form API keys and URLs are used as-is — no ``gsk_`` / ``sk-`` prefix checks.
 """
 
 from __future__ import annotations

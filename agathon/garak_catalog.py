@@ -19,13 +19,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 try:
     import garak.payloads
 
-    # Try multiple paths for the Payload registry based on Garak version
-    payload_obj = getattr(garak.payloads, "Payload", None)
-    if payload_obj and hasattr(payload_obj, "payload_list"):
-        if "whois_injection_contexts" not in payload_obj.payload_list:
-            payload_obj.payload_list["whois_injection_contexts"] = {"path": "dummy"}
-except Exception as e:
-    print(f"[SYSTEM] Garak monkeypatch skipped: {e}")
+    _payload = getattr(garak.payloads, "Payload", None)
+    if _payload is not None and hasattr(_payload, "payload_list"):
+        if "whois_injection_contexts" not in _payload.payload_list:
+            _payload.payload_list["whois_injection_contexts"] = {"path": "dummy"}
+except Exception:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -315,11 +314,11 @@ def _scan_key_env_for_garak(*, scan_api_key: str, target_url: str) -> Dict[str, 
     if not key:
         return env
     provider = resolve_target_provider(target_url, "")
-    if key.startswith("gsk_") or provider == "groq":
+    if provider == "groq":
         env["GROQ_API_KEY"] = key
     elif provider == "anthropic":
         env["ANTHROPIC_API_KEY"] = key
-    elif provider == "openai" or key.startswith("sk-"):
+    elif provider == "openai":
         env["OPENAI_API_KEY"] = key
     else:
         env.setdefault("OPENROUTER_API_KEY", key)
