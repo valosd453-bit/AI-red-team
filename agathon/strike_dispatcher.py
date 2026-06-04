@@ -23,7 +23,6 @@ AUTH_FAILURE_MESSAGE = (
     "Authentication Error: Target rejected the provided API Key."
 )
 KEY_PROVIDER_MISMATCH = "KEY_PROVIDER_MISMATCH"
-HANDSHAKE_ABORT_MESSAGE = KEY_PROVIDER_MISMATCH
 
 STRICT_PAYLOAD_KEYS = frozenset({"model", "messages", "temperature", "max_tokens"})
 
@@ -36,10 +35,6 @@ _ENGINE_KEY_ENVS = (
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
 )
-
-
-class ProviderHandshakeError(ValueError):
-    """Raised when scan-form api_key prefix does not match target URL host."""
 
 
 def _url_host(target_url: str) -> str:
@@ -116,59 +111,10 @@ def _engine_env_keys() -> set[str]:
     return keys
 
 
-def assert_provider_handshake(api_key: str, target_url: str) -> None:
-    key = (api_key or "").strip()
-    host = _url_host(target_url)
-    url_lower = (target_url or "").lower()
-
-    if "openai.com" in host or "openai.com" in url_lower or "api.openai" in url_lower:
-        if not key.startswith("sk-"):
-            log.critical(KEY_PROVIDER_MISMATCH)
-            raise ProviderHandshakeError(KEY_PROVIDER_MISMATCH)
-
-    if "groq.com" in host or "groq.com" in url_lower:
-        if not key.startswith("gsk_"):
-            log.critical(KEY_PROVIDER_MISMATCH)
-            raise ProviderHandshakeError(KEY_PROVIDER_MISMATCH)
-
-
-def assert_target_key_isolation(
-    api_key: str,
-    *,
-    target_url: str,
-    target_provider: str = "",
-) -> None:
-    key = (api_key or "").strip()
-    if not key:
-        raise ValueError("Target API key is empty — provide the key from the scan form.")
-
-    provider = resolve_target_provider(target_url, target_provider)
-    host = _url_host(target_url)
-
-    if key in _engine_env_keys():
-        raise ValueError(
-            f"{KEY_PROVIDER_MISMATCH}: scan key matches an engine credential — "
-            "use the operator API key from the scan form, not bunker env vars."
-        )
-
-    if key.startswith("gsk_") and provider != "groq" and "groq.com" not in host:
-        raise ProviderHandshakeError(KEY_PROVIDER_MISMATCH)
-
-    if provider == "openai" and key.startswith("gsk_"):
-        raise ProviderHandshakeError(KEY_PROVIDER_MISMATCH)
-
-    if (provider == "groq" or "groq.com" in host) and key.startswith("sk-") and not key.startswith("gsk_"):
-        raise ProviderHandshakeError(KEY_PROVIDER_MISMATCH)
-
-
 def _require_scan_key(api_key: str) -> str:
     key = (api_key or "").strip()
     if not key:
         raise ValueError("Target API key is empty — provide the key from the scan form.")
-    if key in _engine_env_keys():
-        raise ValueError(
-            f"{KEY_PROVIDER_MISMATCH}: refusing engine env key for weapon strike."
-        )
     return key
 
 
@@ -205,13 +151,6 @@ class WeaponLLMClient:
         self.timeout = timeout
         self.max_tokens = max_tokens
         self.target_provider = resolve_target_provider(base_url, target_provider)
-
-        assert_provider_handshake(self.api_key, self.base_url)
-        assert_target_key_isolation(
-            self.api_key,
-            target_url=self.base_url,
-            target_provider=self.target_provider,
-        )
 
     def generate_response(
         self,

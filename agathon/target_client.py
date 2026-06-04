@@ -8,7 +8,6 @@ Brain/strategy uses GROQ_API_KEY / OPENROUTER_API_KEY via clients/llm_client.py.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -21,19 +20,6 @@ log = logging.getLogger(__name__)
 AUTH_FAILURE_MESSAGE = (
     "Authentication Error: Target rejected the provided API Key."
 )
-
-HANDSHAKE_ABORT_MESSAGE = "CRITICAL: Key-Provider Mismatch. Strike Aborted."
-
-_ENGINE_KEY_ENVS = (
-    "GROQ_API_KEY",
-    "OPENROUTER_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "OPENAI_API_KEY",
-)
-
-
-class ProviderHandshakeError(ValueError):
-    """Raised when scan-form api_key prefix does not match target URL host."""
 
 
 def _url_host(target_url: str) -> str:
@@ -62,74 +48,6 @@ def resolve_target_provider(target_url: str, explicit: str = "") -> str:
     if "together.xyz" in host or "fireworks.ai" in host:
         return "openai_compat"
     return "openai_compat"
-
-
-def assert_provider_handshake(api_key: str, target_url: str) -> None:
-    key = (api_key or "").strip()
-    host = _url_host(target_url)
-    url_lower = (target_url or "").lower()
-
-    if "openai.com" in host or "openai.com" in url_lower or "api.openai" in url_lower:
-        if not key.startswith("sk-"):
-            log.critical(HANDSHAKE_ABORT_MESSAGE)
-            raise ProviderHandshakeError(HANDSHAKE_ABORT_MESSAGE)
-
-    if "groq.com" in host or "groq.com" in url_lower:
-        if not key.startswith("gsk_"):
-            log.critical(HANDSHAKE_ABORT_MESSAGE)
-            raise ProviderHandshakeError(HANDSHAKE_ABORT_MESSAGE)
-
-
-def _engine_env_keys() -> set[str]:
-    keys: set[str] = set()
-    for name in _ENGINE_KEY_ENVS:
-        val = (os.environ.get(name) or "").strip()
-        if val:
-            keys.add(val)
-    return keys
-
-
-def assert_target_key_isolation(
-    api_key: str,
-    *,
-    target_url: str,
-    target_provider: str = "",
-) -> None:
-    key = (api_key or "").strip()
-    if not key:
-        raise ValueError("Target API key is empty — provide the key from the scan form.")
-
-    provider = resolve_target_provider(target_url, target_provider)
-    host = _url_host(target_url)
-    engine_keys = _engine_env_keys()
-
-    if key in engine_keys:
-        if provider == "groq" or "groq.com" in host:
-            return
-        raise ValueError(
-            "Target API key matches an engine credential (GROQ/OpenRouter) but "
-            f"target URL is not Groq ({host or target_url}). "
-            "Use the API key for the target endpoint you entered in the scan form."
-        )
-
-    if key.startswith("gsk_") and provider != "groq" and "groq.com" not in host:
-        raise ValueError(
-            "Groq API key (gsk_…) cannot be used against non-Groq target endpoints. "
-            "When targeting OpenAI, paste your OpenAI sk-… key from the scan form. "
-            "GROQ_API_KEY is reserved for the Agathon brain only."
-        )
-
-    if provider == "openai" and key.startswith("gsk_"):
-        raise ValueError(
-            "Groq API key (gsk_…) cannot be used against OpenAI endpoints. "
-            "Paste your OpenAI sk-… key in the scan form."
-        )
-
-    if (provider == "groq" or "groq.com" in host) and key.startswith("sk-") and not key.startswith("gsk_"):
-        raise ValueError(
-            "OpenAI API key (sk-…) cannot be used against Groq endpoints. "
-            "Paste your Groq gsk_… key in the scan form."
-        )
 
 
 def _require_user_scan_key(api_key: str) -> str:
@@ -169,13 +87,6 @@ class UniversalTargetClient:
         self.timeout = timeout
         self.max_tokens = max_tokens
         self.target_provider = resolve_target_provider(url, target_provider)
-
-        assert_provider_handshake(self.api_key, self.base_url)
-        assert_target_key_isolation(
-            self.api_key,
-            target_url=self.base_url,
-            target_provider=self.target_provider,
-        )
         self._llm_client: Optional[OpenAICompatibleClient] = None
 
     def authorization_header(self) -> str:

@@ -8,7 +8,6 @@ from core.strike_logic import *  # noqa: F403
 
 from core.strike_logic import (
     AUTH_FAILURE_MESSAGE,
-    assert_target_key_isolation,
     build_target_authorization,
     build_target_client,
     is_auth_failure_response,
@@ -18,7 +17,6 @@ from core.strike_logic import (
 
 __all__ = [
     "AUTH_FAILURE_MESSAGE",
-    "assert_target_key_isolation",
     "build_target_authorization",
     "build_target_client",
     "is_auth_failure_response",

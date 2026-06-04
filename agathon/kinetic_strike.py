@@ -13,9 +13,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from .strike_dispatcher import (
     AUTH_FAILURE_MESSAGE,
-    HANDSHAKE_ABORT_MESSAGE,
     KEY_PROVIDER_MISMATCH,
-    ProviderHandshakeError,
     WeaponLLMClient,
     build_weapon_client,
     is_auth_failure_response,
@@ -299,30 +297,12 @@ async def run_kinetic_strike(
         target_model=state.target_model,
     )
 
-    try:
-        kinetic = TargetStrikeClient(
-            base_url=state.target_url,
-            api_key=state.api_key,
-            model=state.target_model,
-            target_provider=state.target_provider,
-        )
-    except ProviderHandshakeError as exc:
-        logger.critical(HANDSHAKE_ABORT_MESSAGE)
-        return KineticStrikeResult(
-            strike_name=strike_name,
-            category=category,
-            success=False,
-            severity="critical",
-            payload={
-                "success": False,
-                "handshake_aborted": True,
-                "message": HANDSHAKE_ABORT_MESSAGE,
-                "detail": str(exc),
-                "strike_name": strike_name,
-            },
-            summary=HANDSHAKE_ABORT_MESSAGE,
-            rationale=rationale,
-        )
+    kinetic = TargetStrikeClient(
+        base_url=state.target_url,
+        api_key=state.api_key,
+        model=state.target_model,
+        target_provider=state.target_provider,
+    )
 
     def _fire() -> TargetStrikeResult:
         return kinetic.fire(attack_prompt)

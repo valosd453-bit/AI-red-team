@@ -7,7 +7,6 @@ request. Engine env keys (GROQ_API_KEY, OPENROUTER_API_KEY) are never used here.
 
 from agathon.target_client import (
     AUTH_FAILURE_MESSAGE,
-    assert_target_key_isolation,
     build_target_authorization,
     build_target_client,
     is_auth_failure_response,
@@ -26,7 +25,6 @@ def strike_authorization_header(api_key: str, target_provider: str = "") -> str:
 
 __all__ = [
     "AUTH_FAILURE_MESSAGE",
-    "assert_target_key_isolation",
     "build_target_authorization",
     "build_target_client",
     "is_auth_failure_response",

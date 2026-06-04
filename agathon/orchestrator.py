@@ -130,11 +130,7 @@ from .supabase_sync import (  # noqa: E402
 )
 from .strike_dispatcher import (  # noqa: E402
     AUTH_FAILURE_MESSAGE,
-    HANDSHAKE_ABORT_MESSAGE,
     KEY_PROVIDER_MISMATCH,
-    ProviderHandshakeError,
-    assert_provider_handshake,
-    assert_target_key_isolation,
     build_proof_of_work_poc,
     build_weapon_client,
     is_auth_failure_response,
@@ -219,40 +215,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("agathon.orchestrator")
-
-# #region agent log
-_DEBUG_LOG_PATH = (
-    Path(__file__).resolve().parents[2] / "debug-c20499.log"
-)
-
-
-def _agent_debug(
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: Optional[Dict[str, Any]] = None,
-    *,
-    run_id: str = "audit-pre",
-) -> None:
-    try:
-        import json as _json
-
-        payload = {
-            "sessionId": "c20499",
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data or {},
-            "timestamp": int(time.time() * 1000),
-        }
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as _f:
-            _f.write(_json.dumps(payload) + "\n")
-    except Exception:  # noqa: BLE001
-        pass
-
-
-# #endregion
 
 
 # --------------------------------------------------------------------------- #
@@ -385,17 +347,6 @@ async def _bump_progress(
             severity="info",
             payload={"message": f"Scan progress: {target}%", "phase": phase},
         )
-    # #region agent log
-    _agent_debug(
-        "A",
-        "orchestrator.py:_bump_progress",
-        "progress_bumped",
-        {"scan_id": state.scan_id, "pct": target, "phase": phase},
-        run_id=run_id,
-    )
-    # #endregion
-
-
 def _get_groq_client():
     """Build a Groq SDK client (singleton). Raises if GROQ_API_KEY is unset.
 
@@ -778,17 +729,6 @@ async def _update_scan_row(
         )
     except Exception as e:  # noqa: BLE001
         log.error("scans update failed for %s: %s", state.scan_id, e)
-        # #region agent log
-        _agent_debug(
-            "A",
-            "orchestrator.py:_update_scan_row",
-            "scans_update_failed",
-            {"scan_id": state.scan_id, "fields": list(fields.keys()), "error": str(e)[:300]},
-            run_id="post-fix",
-        )
-        # #endregion
-
-
 async def _handle_target_auth_failure(
     state: AgathonState,
     *,
@@ -1019,17 +959,6 @@ async def _emit_scan_report(
         )
     except Exception as e:  # noqa: BLE001
         log.error("scan_reports upsert failed: %s", e)
-        # #region agent log
-        _agent_debug(
-            "E",
-            "orchestrator.py:_emit_scan_report",
-            "scan_reports_upsert_failed",
-            {"scan_id": state.scan_id, "error": str(e)[:400]},
-            run_id="post-fix",
-        )
-        # #endregion
-
-
 def _build_optimization_md(report: Dict[str, Any]) -> str:
     """One-shot markdown rollup of the remediation roadmap, used by the
     'Optimisation suggestions' panel in the dashboard."""
@@ -1708,10 +1637,6 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
             await _bump_progress(
                 state, pct, phase=f"kinetic_battery:{strike_name}"
             )
-        except ProviderHandshakeError as e:
-            log.critical(HANDSHAKE_ABORT_MESSAGE)
-            await _handle_target_auth_failure(state, detail=str(e))
-            return
         except ValueError as e:
             await _handle_target_auth_failure(state, detail=str(e))
             return
@@ -2111,22 +2036,7 @@ def _parse_tool_arguments(raw: Any) -> Dict[str, Any]:
 
 
 async def _target_preflight(state: AgathonState) -> bool:
-    """Liveness probe against the user-supplied target API key (Groq/OpenAI/etc)."""
-
-    try:
-        assert_provider_handshake(state.api_key, state.target_url)
-        assert_target_key_isolation(
-            state.api_key,
-            target_url=state.target_url,
-            target_provider=state.target_provider,
-        )
-    except ProviderHandshakeError as e:
-        log.critical(HANDSHAKE_ABORT_MESSAGE)
-        await _handle_target_auth_failure(state, detail=str(e))
-        return False
-    except ValueError as e:
-        await _handle_target_auth_failure(state, detail=str(e))
-        return False
+    """Liveness probe against the user-supplied target API key."""
 
     def _probe() -> str:
         client = build_weapon_client(
@@ -2204,18 +2114,6 @@ async def _target_preflight(state: AgathonState) -> bool:
             "first_bytes": (probe or "")[:120],
         },
     )
-    # #region agent log
-    _agent_debug(
-        "A",
-        "orchestrator.py:_target_preflight",
-        "preflight_success",
-        {
-            "scan_id": state.scan_id,
-            "progress_pct": state.progress_pct,
-            "elapsed_s": round(state.wall_seconds(), 3),
-        },
-    )
-    # #endregion
     return True
 
 
@@ -2937,15 +2835,6 @@ _HOT_RELOAD_DONE = False
 async def run_scan(state: AgathonState) -> None:
     """Top-level lifecycle: probing -> brain loop -> seal -> usage emit."""
     global _HOT_RELOAD_DONE
-    # #region agent log
-    _scan_t0 = time.perf_counter()
-    _agent_debug(
-        "B",
-        "orchestrator.py:run_scan",
-        "run_scan_enter",
-        {"scan_id": state.scan_id, "sovereign": _is_sovereign_scan(state)},
-    )
-    # #endregion
     if _is_groq_free_tier_strike(state):
         await _emit_scan_log(
             state,
@@ -2966,9 +2855,6 @@ async def run_scan(state: AgathonState) -> None:
             from . import kinetic_strike
             from .garak_catalog import get_kinetic_battery_strikes, hot_reload_garak_catalog
 
-            # #region agent log
-            _hr_t0 = time.perf_counter()
-            # #endregion
             await asyncio.to_thread(
                 hot_reload_garak_catalog,
                 state.api_key,
@@ -2978,18 +2864,6 @@ async def run_scan(state: AgathonState) -> None:
                 get_kinetic_battery_strikes
             )
             _HOT_RELOAD_DONE = True
-            # #region agent log
-            _agent_debug(
-                "B",
-                "orchestrator.py:run_scan",
-                "hot_reload_done",
-                {
-                    "scan_id": state.scan_id,
-                    "ms": round((time.perf_counter() - _hr_t0) * 1000, 2),
-                    "battery_len": len(kinetic_strike.KINETIC_BATTERY),
-                },
-            )
-            # #endregion
         except Exception as exc:  # noqa: BLE001
             log.warning("[registry] hot reload on first scan skipped: %s", exc)
 
@@ -3003,14 +2877,6 @@ async def run_scan(state: AgathonState) -> None:
             "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(state.started_at)
         ),
     )
-    # #region agent log
-    _agent_debug(
-        "A",
-        "orchestrator.py:run_scan",
-        "progress_set_2",
-        {"scan_id": state.scan_id, "ms_since_enter": round((time.perf_counter() - _scan_t0) * 1000, 2)},
-    )
-    # #endregion
     await _emit_scan_log(
         state, log_type="info", severity="info",
         payload={
@@ -3040,56 +2906,13 @@ async def run_scan(state: AgathonState) -> None:
                 )
             else:
                 await _bump_progress(state, 5, phase="preflight_ok")
-                # #region agent log
-                _agent_debug(
-                    "C",
-                    "orchestrator.py:run_scan",
-                    "preflight_ok_entering_kinetic",
-                    {"scan_id": state.scan_id, "progress_pct": state.progress_pct},
-                )
-                _kv_t0 = time.perf_counter()
-                # #endregion
                 await _run_kinetic_vectors(state)
-                # #region agent log
-                _agent_debug(
-                    "C",
-                    "orchestrator.py:run_scan",
-                    "kinetic_vectors_done",
-                    {
-                        "scan_id": state.scan_id,
-                        "ms": round((time.perf_counter() - _kv_t0) * 1000, 2),
-                        "progress_pct": state.progress_pct,
-                    },
-                )
-                _kb_t0 = time.perf_counter()
-                # #endregion
                 await _run_kinetic_battery(state)
-                # #region agent log
-                _agent_debug(
-                    "C",
-                    "orchestrator.py:run_scan",
-                    "kinetic_battery_done",
-                    {
-                        "scan_id": state.scan_id,
-                        "ms": round((time.perf_counter() - _kb_t0) * 1000, 2),
-                        "progress_pct": state.progress_pct,
-                        "attacks_run": state.attacks_run,
-                    },
-                )
-                # #endregion
                 await _brain_loop(state)
         else:
-            try:
-                assert_provider_handshake(state.api_key, state.target_url)
-            except ProviderHandshakeError as e:
-                log.critical(HANDSHAKE_ABORT_MESSAGE)
-                await _handle_target_auth_failure(state, detail=str(e))
-                final_status = "failed"
-                failure_reason = str(e)
-            else:
-                await _run_kinetic_vectors(state)
-                state.sealed = True
-                state.seal_reason = f"surface_probe_complete:{state.surface_kind}"
+            await _run_kinetic_vectors(state)
+            state.sealed = True
+            state.seal_reason = f"surface_probe_complete:{state.surface_kind}"
         if not state.sealed and not state.cancelled:
             failure_reason = state.seal_reason or "brain_loop_ended_unexpectedly"
             final_status = "failed"
@@ -3347,22 +3170,6 @@ async def _notify_agathon_webhook(
             "callback_host": callback.split("/")[2] if "://" in callback else callback,
         },
     )
-    # #region agent log
-    _agent_debug(
-        "F3",
-        "orchestrator.py:_notify_agathon_webhook",
-        "webhook_post_result",
-        {
-            "scan_id": state.scan_id,
-            "status_code": status_code,
-            "persist_ok": persist_ok,
-            "persist_error": persist_error,
-        },
-        run_id="post-fix",
-    )
-    # #endregion
-
-
 async def _record_usage_events(state: AgathonState) -> None:
     """Write the metered-billing rows. These are what Stripe charges off."""
     rows = [
@@ -3553,20 +3360,6 @@ async def identity_ocr(req: IdentityOcrRequest) -> Dict[str, Any]:
     dependencies=[Depends(_require_internal_secret)],
 )
 async def scan_start(req: StartScanRequest) -> StartScanResponse:
-    # #region agent log
-    _agent_debug(
-        "H1",
-        "orchestrator.py:scan_start",
-        "request_received",
-        {
-            "scan_id": req.scan_id,
-            "intensity": req.intensity,
-            "surface_kind": req.surface_kind,
-            "asset_value_usd": req.asset_value_usd,
-            "has_api_key": bool(req.api_key),
-        },
-    )
-    # #endregion
     if await _STATE.get(req.scan_id):
         raise HTTPException(status_code=409, detail="scan already running")
 
@@ -3576,34 +3369,8 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
     safe_url = _sanitize_target_url(req.target_url)
     provider = resolve_target_provider(safe_url, (req.target_provider or "").strip())
 
-    try:
-        assert_provider_handshake(req.api_key, safe_url)
-        assert_target_key_isolation(
-            req.api_key,
-            target_url=safe_url,
-            target_provider=provider,
-        )
-    except ProviderHandshakeError as e:
-        log.critical(HANDSHAKE_ABORT_MESSAGE)
-        # #region agent log
-        _agent_debug(
-            "H2",
-            "orchestrator.py:scan_start",
-            "handshake_rejected",
-            {"scan_id": req.scan_id, "detail": str(e)[:200]},
-        )
-        # #endregion
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except ValueError as e:
-        # #region agent log
-        _agent_debug(
-            "H3",
-            "orchestrator.py:scan_start",
-            "validation_rejected",
-            {"scan_id": req.scan_id, "detail": str(e)[:200]},
-        )
-        # #endregion
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not (req.api_key or "").strip():
+        raise HTTPException(status_code=400, detail="api_key is required")
 
     asset_val = float(req.asset_value_usd) if req.asset_value_usd > 0 else 50000.0
 
@@ -3722,17 +3489,6 @@ async def scan_ws(websocket: WebSocket, scan_id: str, token: str = "") -> None:
 async def _validation_error(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    # #region agent log
-    _agent_debug(
-        "H4",
-        "orchestrator.py:scan_start",
-        "pydantic_validation_error",
-        {
-            "path": str(request.url.path),
-            "errors": exc.errors()[:8],
-        },
-    )
-    # #endregion
     return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 

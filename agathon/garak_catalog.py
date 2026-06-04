@@ -16,6 +16,16 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+try:
+    import garak.payloads
+
+    if "whois_injection_contexts" not in garak.payloads.Payload.payload_list:
+        garak.payloads.Payload.payload_list["whois_injection_contexts"] = {
+            "path": "dummy"
+        }
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 # Build-time floor (Docker/nixpacks) — Garak cold-starts without full runtime env
