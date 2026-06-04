@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any, Dict, List, Set, TYPE_CHECKING
@@ -30,15 +31,13 @@ _FORM_RE = re.compile(r"""action\s*=\s*['"]([^'"]+)['"]""", re.I)
 _FETCH_RE = re.compile(r"""fetch\s*\(\s*['"]([^'"]+)['"]""", re.I)
 
 
-async def _logic_discovery(
-    url: str,
-    auth_header: str,
-) -> List[Dict[str, Any]]:
+def _logic_discovery_sync(url: str, auth_header: str) -> List[Dict[str, Any]]:
+    """Sync Playwright crawl — run via asyncio.to_thread so /health stays responsive."""
     findings: List[Dict[str, Any]] = []
     discovered: Set[str] = set()
 
     try:
-        from playwright.async_api import async_playwright
+        from playwright.sync_api import sync_playwright
     except ImportError:
         logger.warning("[web_app] playwright not installed")
         return findings
@@ -46,15 +45,14 @@ async def _logic_discovery(
     parsed = urlparse(url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
         extra = {"Authorization": auth_header} if auth_header else {}
-        context = await browser.new_context(extra_http_headers=extra)
-        page = await context.new_page()
-
+        context = browser.new_context(extra_http_headers=extra)
+        page = context.new_page()
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-            html = await page.content()
+            page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+            html = page.content()
             for pattern in (_HREF_RE, _FORM_RE, _FETCH_RE):
                 for match in pattern.findall(html):
                     if match.startswith("/") or match.startswith("http"):
@@ -63,7 +61,7 @@ async def _logic_discovery(
             for hidden in _HIDDEN_PATHS:
                 test_url = urljoin(origin, hidden)
                 try:
-                    resp = await page.goto(
+                    resp = page.goto(
                         test_url, wait_until="domcontentloaded", timeout=10_000
                     )
                     status = resp.status if resp else 0
@@ -90,15 +88,20 @@ async def _logic_discovery(
                     }
                 )
         finally:
-            await browser.close()
+            browser.close()
 
     return findings
 
 
-async def _xss_sqli_scout(url: str, auth_header: str) -> List[Dict[str, Any]]:
+async def _logic_discovery(url: str, auth_header: str) -> List[Dict[str, Any]]:
+    return await asyncio.to_thread(_logic_discovery_sync, url, auth_header)
+
+
+def _xss_sqli_scout_sync(url: str, auth_header: str) -> List[Dict[str, Any]]:
+    """XSS Vector Scout + SQLi — sync Playwright in worker thread (non-blocking event loop)."""
     findings: List[Dict[str, Any]] = []
     try:
-        from playwright.async_api import async_playwright
+        from playwright.sync_api import sync_playwright
     except ImportError:
         return findings
 
@@ -106,10 +109,10 @@ async def _xss_sqli_scout(url: str, auth_header: str) -> List[Dict[str, Any]]:
     base_query = parse_qs(parsed.query)
     extra = {"Authorization": auth_header} if auth_header else {}
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context(extra_http_headers=extra)
-        page = await context.new_page()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(extra_http_headers=extra)
+        page = context.new_page()
         try:
             for payload in _SQLI_PAYLOADS:
                 q = dict(base_query)
@@ -118,8 +121,8 @@ async def _xss_sqli_scout(url: str, auth_header: str) -> List[Dict[str, Any]]:
                     parsed._replace(query=urlencode(q, doseq=True))
                 )
                 try:
-                    r = await page.goto(test_url, wait_until="domcontentloaded", timeout=15_000)
-                    body = await page.content()
+                    r = page.goto(test_url, wait_until="domcontentloaded", timeout=15_000)
+                    body = page.content()
                     sqli_hit = any(
                         m in body.lower()
                         for m in ("sql syntax", "mysql", "sqlite", "postgresql", "ora-")
@@ -145,8 +148,8 @@ async def _xss_sqli_scout(url: str, auth_header: str) -> List[Dict[str, Any]]:
             xss_q = dict(base_query)
             xss_q.setdefault("search", [_XSS_CANARY])
             xss_url = urlunparse(parsed._replace(query=urlencode(xss_q, doseq=True)))
-            await page.goto(xss_url, wait_until="domcontentloaded", timeout=15_000)
-            xss_html = await page.content()
+            page.goto(xss_url, wait_until="domcontentloaded", timeout=15_000)
+            xss_html = page.content()
             reflected = _XSS_CANARY in xss_html
             findings.append(
                 {
@@ -157,9 +160,13 @@ async def _xss_sqli_scout(url: str, auth_header: str) -> List[Dict[str, Any]]:
                 }
             )
         finally:
-            await browser.close()
+            browser.close()
 
     return findings
+
+
+async def _xss_sqli_scout(url: str, auth_header: str) -> List[Dict[str, Any]]:
+    return await asyncio.to_thread(_xss_sqli_scout_sync, url, auth_header)
 
 
 async def run_web_app_probes(state: "AgathonState") -> List[Dict[str, Any]]:
