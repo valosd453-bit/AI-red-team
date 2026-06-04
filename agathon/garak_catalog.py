@@ -19,12 +19,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 try:
     import garak.payloads
 
-    if "whois_injection_contexts" not in garak.payloads.Payload.payload_list:
-        garak.payloads.Payload.payload_list["whois_injection_contexts"] = {
-            "path": "dummy"
-        }
-except ImportError:
-    pass
+    # Try multiple paths for the Payload registry based on Garak version
+    payload_obj = getattr(garak.payloads, "Payload", None)
+    if payload_obj and hasattr(payload_obj, "payload_list"):
+        if "whois_injection_contexts" not in payload_obj.payload_list:
+            payload_obj.payload_list["whois_injection_contexts"] = {"path": "dummy"}
+except Exception as e:
+    print(f"[SYSTEM] Garak monkeypatch skipped: {e}")
 
 logger = logging.getLogger(__name__)
 

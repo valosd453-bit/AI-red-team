@@ -502,6 +502,23 @@ def _is_private_ip(host: str) -> bool:
     return False
 
 
+_SURFACE_KIND_ALIASES = {
+    "api": "code",
+    "bot": "mobile",
+    "gateway": "code",
+    "chatbot": "mobile",
+}
+
+
+def _resolve_surface_kind(target_type: str, surface_kind: str) -> str:
+    """Normalize ForgeGuard target_type / surface_kind to scan_surface_kind enum."""
+    raw = (target_type or surface_kind or "llm").strip().lower()
+    raw = _SURFACE_KIND_ALIASES.get(raw, raw)
+    if raw in ("llm", "web", "code", "mobile"):
+        return raw
+    return "llm"
+
+
 def _sanitize_target_url(url: str) -> str:
     """
     Validate *url* for SSRF safety.
@@ -3237,6 +3254,7 @@ class StartScanRequest(BaseModel):
     api_key: str = Field(..., min_length=1)
     ownership_verified: bool = False
     surface_kind: str = Field(default="llm")
+    target_type: str = Field(default="")
     target_provider: str = Field(default="")
     asset_value_usd: float = Field(default=50000.0)
 
@@ -3382,7 +3400,7 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
         intensity=intensity,
         api_key=req.api_key,
         ownership_verified=bool(req.ownership_verified),
-        surface_kind=(req.surface_kind or "llm").strip() or "llm",
+        surface_kind=_resolve_surface_kind(req.target_type, req.surface_kind),
         target_provider=provider,
         asset_value_usd=asset_val,
     )
