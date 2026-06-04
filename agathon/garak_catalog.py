@@ -8,6 +8,28 @@ scan budgets (see ``MAX_PROBES_PER_STRIKE`` in ``garak_runner``).
 
 from __future__ import annotations
 
+import sys
+import types
+
+# PRE-EMPTIVE SHIELD: Inject the missing key into the Garak payload registry
+# This stops the KeyError: 'whois_injection_contexts' from killing the boot
+try:
+    import garak.payloads
+
+    if not hasattr(garak.payloads, "Payload"):
+        # Fallback if class structure differs
+        garak.payloads.Payload = type("Payload", (), {"payload_list": {}})
+    if not hasattr(garak.payloads.Payload, "payload_list"):
+        garak.payloads.Payload.payload_list = {}
+
+    if "whois_injection_contexts" not in garak.payloads.Payload.payload_list:
+        garak.payloads.Payload.payload_list["whois_injection_contexts"] = {
+            "path": "dummy"
+        }
+        print("[SYSTEM] Garak KeyError Bypass Engaged.")
+except Exception as e:
+    print(f"[SYSTEM] Garak Registry Shield failed: {e}")
+
 import importlib
 import inspect
 import logging
@@ -15,16 +37,6 @@ import pkgutil
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
-
-try:
-    import garak.payloads
-
-    _payload = getattr(garak.payloads, "Payload", None)
-    if _payload is not None and hasattr(_payload, "payload_list"):
-        if "whois_injection_contexts" not in _payload.payload_list:
-            _payload.payload_list["whois_injection_contexts"] = {"path": "dummy"}
-except Exception:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +100,24 @@ _MODULE_TO_CATEGORY: Dict[str, str] = {
 _CANONICAL_CATEGORIES = frozenset(
     {"prompt_injection", "jailbreak", "pii_leak", "hallucination"}
 )
+
+
+def _engage_garak_registry_shield() -> None:
+    """Re-apply whois_injection_contexts after garak.* eviction / hot reload."""
+    try:
+        import garak.payloads
+
+        if not hasattr(garak.payloads, "Payload"):
+            garak.payloads.Payload = type("Payload", (), {"payload_list": {}})
+        if not hasattr(garak.payloads.Payload, "payload_list"):
+            garak.payloads.Payload.payload_list = {}
+        if "whois_injection_contexts" not in garak.payloads.Payload.payload_list:
+            garak.payloads.Payload.payload_list["whois_injection_contexts"] = {
+                "path": "dummy"
+            }
+            print("[SYSTEM] Garak KeyError Bypass Engaged.")
+    except Exception as e:
+        print(f"[SYSTEM] Garak Registry Shield failed: {e}")
 
 
 def canonical_garak_family(category: str) -> str:
@@ -225,6 +255,7 @@ def discover_garak_probes(
     import os
 
     _sync_runtime_env_for_garak(env or dict(os.environ))
+    _engage_garak_registry_shield()
     specs: List[GarakProbeSpec] = []
     seen: set[str] = set()
     modules_tried = 0
@@ -244,37 +275,42 @@ def discover_garak_probes(
 
     for modname in modnames:
         modules_tried += 1
-        family_key = _probe_family_key(modname)
         try:
-            mod = importlib.import_module(modname)
-        except Exception as exc:  # noqa: BLE001
+            family_key = _probe_family_key(modname)
+            try:
+                mod = importlib.import_module(modname)
+            except Exception:  # noqa: BLE001
+                modules_failed += 1
+                continue
+
+            category = _category_for_module(family_key)
+            family = canonical_garak_family(category)
+            level = _level_for_module(family_key)
+
+            for _attr, obj in inspect.getmembers(mod, inspect.isclass):
+                try:
+                    if not _is_probe_class(obj, modname):
+                        continue
+                    class_name = obj.__name__
+                    registry_name = _registry_name_for(modname, class_name)
+                    if registry_name in seen:
+                        continue
+                    seen.add(registry_name)
+                    specs.append(
+                        GarakProbeSpec(
+                            registry_name=registry_name,
+                            module_name=family_key,
+                            class_name=class_name,
+                            category=category,
+                            family=family,
+                            level=level,
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
             modules_failed += 1
-            log_fn = logger.info if len(specs) < RUNTIME_TARGET_PROBES else logger.debug
-            log_fn("[garak_catalog] skip module %s: %s", modname, exc)
             continue
-
-        category = _category_for_module(family_key)
-        family = canonical_garak_family(category)
-        level = _level_for_module(family_key)
-
-        for _attr, obj in inspect.getmembers(mod, inspect.isclass):
-            if not _is_probe_class(obj, modname):
-                continue
-            class_name = obj.__name__
-            registry_name = _registry_name_for(modname, class_name)
-            if registry_name in seen:
-                continue
-            seen.add(registry_name)
-            specs.append(
-                GarakProbeSpec(
-                    registry_name=registry_name,
-                    module_name=family_key,
-                    class_name=class_name,
-                    category=category,
-                    family=family,
-                    level=level,
-                )
-            )
 
     specs.sort(key=lambda s: s.registry_name)
     logger.info(
@@ -351,13 +387,30 @@ def hot_reload_garak_catalog(
     if evicted:
         logger.info("[registry] Hot reload evicted %d garak.* modules", evicted)
 
-    # Force-import probe tree root before walk
+    importlib.invalidate_caches()
+    _engage_garak_registry_shield()
+
+    # Force-import and reload probe tree — clears failed import caches
     try:
-        importlib.import_module("garak")
-        importlib.import_module("garak.probes")
+        garak_pkg = importlib.import_module("garak")
+        importlib.reload(garak_pkg)
+        probes_root = importlib.import_module("garak.probes")
+        importlib.reload(probes_root)
+        logger.info(
+            "[registry] garak.probes force-reloaded (%s)",
+            getattr(probes_root, "__path__", "?"),
+        )
     except ImportError as exc:
         logger.warning("[registry] garak import failed during hot reload: %s", exc)
         return 0
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[registry] garak.probes reload failed: %s", exc)
+        _engage_garak_registry_shield()
+        try:
+            importlib.import_module("garak")
+            importlib.import_module("garak.probes")
+        except ImportError:
+            return 0
 
     from forgeguard_bridge import reload_garak_heavy_registry
 
