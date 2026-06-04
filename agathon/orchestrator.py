@@ -2967,7 +2967,11 @@ async def run_scan(state: AgathonState) -> None:
             # #region agent log
             _hr_t0 = time.perf_counter()
             # #endregion
-            await asyncio.to_thread(hot_reload_garak_catalog)
+            await asyncio.to_thread(
+                hot_reload_garak_catalog,
+                state.api_key,
+                state.target_url,
+            )
             kinetic_strike.KINETIC_BATTERY = await asyncio.to_thread(
                 get_kinetic_battery_strikes
             )
@@ -3256,6 +3260,21 @@ async def _notify_agathon_webhook(
             "No exploitable vulnerabilities at current intensity."
         )
 
+    attacks_run_int = int(round(float(state.attacks_run or 0)))
+    if not technical_md and not state.findings:
+        technical_md = (
+            f"# ForgeGuard Agathon Scan Report\n\n"
+            f"**Scan ID:** `{state.scan_id}`\n"
+            f"**Target model:** {state.target_model}\n"
+            f"**Target URL:** {state.target_url}\n"
+            f"**Intensity:** {state.intensity.value}\n"
+            f"**Attacks run:** {attacks_run_int}\n"
+            f"**Findings:** 0 exploitable vulnerabilities at current intensity.\n\n"
+            f"{exec_summary}"
+        )
+    elif not technical_md:
+        technical_md = exec_summary or ""
+
     overall_sev = "NONE"
     if report:
         raw_sev = str(report.get("overall_severity") or "NONE").strip().upper()
@@ -3263,8 +3282,6 @@ async def _notify_agathon_webhook(
             overall_sev = raw_sev
         elif raw_sev in {"INFO", "INFORMATIONAL"}:
             overall_sev = "LOW"
-
-    attacks_run_int = int(round(float(state.attacks_run or 0)))
 
     payload = {
         "kind": "scan.completed",

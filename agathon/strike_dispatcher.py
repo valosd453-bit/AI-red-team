@@ -70,6 +70,11 @@ def resolve_target_provider(target_url: str, explicit: str = "") -> str:
     return "openai_compat"
 
 
+def provider_from_url(target_url: str, explicit: str = "") -> str:
+    """Resolve provider from target URL with optional explicit override (orchestrator API)."""
+    return resolve_target_provider(target_url, explicit)
+
+
 def normalize_openai_base_url(base_url: str) -> str:
     base = (base_url or "").strip().rstrip("/")
     if not base.startswith("http"):

@@ -288,7 +288,37 @@ def probe_count(*, log: bool = True, env: Optional[Dict[str, str]] = None) -> in
     return n
 
 
-def hot_reload_garak_catalog() -> int:
+def _scan_key_env_for_garak(*, scan_api_key: str, target_url: str) -> Dict[str, str]:
+    """
+    Build env snapshot for Garak probe discovery using the scan-form API key.
+
+    Key Isolation: this only affects probe module import-time checks — kinetic
+    strikes still use ``state.api_key`` via ``build_weapon_client``.
+    """
+    import os
+
+    from .strike_dispatcher import resolve_target_provider
+
+    env = dict(os.environ)
+    key = (scan_api_key or "").strip()
+    if not key:
+        return env
+    provider = resolve_target_provider(target_url, "")
+    if key.startswith("gsk_") or provider == "groq":
+        env["GROQ_API_KEY"] = key
+    elif provider == "anthropic":
+        env["ANTHROPIC_API_KEY"] = key
+    elif provider == "openai" or key.startswith("sk-"):
+        env["OPENAI_API_KEY"] = key
+    else:
+        env.setdefault("OPENROUTER_API_KEY", key)
+    return env
+
+
+def hot_reload_garak_catalog(
+    scan_api_key: str = "",
+    target_url: str = "",
+) -> int:
     """
     Evict garak imports and re-discover the full arsenal via garak.probes.* walk.
     Triggered on first scan start when the bunker is live.
@@ -296,7 +326,11 @@ def hot_reload_garak_catalog() -> int:
     import os
     import sys
 
-    runtime_env = dict(os.environ)
+    runtime_env = (
+        _scan_key_env_for_garak(scan_api_key=scan_api_key, target_url=target_url)
+        if (scan_api_key or "").strip()
+        else dict(os.environ)
+    )
     _sync_runtime_env_for_garak(runtime_env)
 
     evicted = 0
@@ -319,11 +353,11 @@ def hot_reload_garak_catalog() -> int:
 
     added, registry_size = reload_garak_heavy_registry()
     n = probe_count(log=True, env=runtime_env)
+    print(f"[registry] Hot reload probes detected: {n}", flush=True)
     msg = (
         f"[registry] Hot reload probes detected: {n} "
         f"(registry={registry_size}, added={added}, target {RUNTIME_TARGET_PROBES}+)"
     )
-    print(msg, flush=True)
     logger.info(msg)
     if n < RUNTIME_TARGET_PROBES:
         logger.warning(
