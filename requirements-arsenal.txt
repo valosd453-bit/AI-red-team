@@ -1,3 +1,6 @@
 # Garak probe catalogue — install with: pip install -r requirements-arsenal.txt --no-deps
+# Transitive deps garak needs when installed with --no-deps:
+jsonschema==4.21.1
+jsonref==1.1.0
 garak==0.10.3.1
 litellm==1.41.21

@@ -3442,28 +3442,59 @@ app = FastAPI(title="Agathon Orchestrator", version="0.2.0")
 @app.on_event("startup")
 async def _startup_checks() -> None:
     from forgeguard_bridge import REGISTRY
-    from agathon.garak_catalog import (
-        hot_reload_garak_catalog,
-        probe_count,
-        RUNTIME_TARGET_PROBES,
-    )
-
-    try:
-        hot_reload_garak_catalog()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[registry] Startup hot_reload_garak_catalog failed: %s", exc)
 
     registry_size = len(REGISTRY)
-    garak_count = probe_count(log=False)
+    garak_count = 0
+    runtime_target = 350
+
+    try:
+        from agathon.garak_catalog import (
+            hot_reload_garak_catalog,
+            probe_count,
+            RUNTIME_TARGET_PROBES,
+        )
+
+        runtime_target = RUNTIME_TARGET_PROBES
+        try:
+            hot_reload_garak_catalog()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[registry] Startup hot_reload_garak_catalog failed: %s", exc)
+        garak_count = probe_count(log=False)
+    except Exception as exc:  # noqa: BLE001
+        print("[CRITICAL] Garak loading delayed — server online.", flush=True)
+        log.warning("[registry] Garak startup deferred: %s", exc)
+        # #region agent log
+        try:
+            import json as _json
+            import time as _time
+
+            with open("debug-c20499.log", "a", encoding="utf-8") as _fh:
+                _fh.write(
+                    _json.dumps(
+                        {
+                            "sessionId": "c20499",
+                            "location": "orchestrator.py:_startup_checks",
+                            "message": "garak deferred",
+                            "data": {"error": str(exc)[:300]},
+                            "timestamp": int(_time.time() * 1000),
+                            "hypothesisId": "H2-startup-garak-deferred",
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
+
     print(
         f"[registry] Startup summary: {registry_size} registry entries, "
-        f"garak_classes={garak_count} (target {RUNTIME_TARGET_PROBES}+)."
+        f"garak_classes={garak_count} (target {runtime_target}+)."
     )
     log.info(
         "[registry] Startup summary: %d registry entries, garak_classes=%d (target %d+)",
         registry_size,
         garak_count,
-        RUNTIME_TARGET_PROBES,
+        runtime_target,
     )
     if not _resolve_internal_token():
         log.warning(

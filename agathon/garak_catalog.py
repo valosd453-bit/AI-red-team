@@ -8,9 +8,19 @@ scan budgets (see ``MAX_PROBES_PER_STRIKE`` in ``garak_runner``).
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import json
+import logging
+import pkgutil
+import re
 import sys
 import time
+import types
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 # #region agent log
 def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
@@ -32,39 +42,45 @@ def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str
         pass
 # #endregion
 
-import garak  # noqa: F401 — parent package before submodules
-
-import garak.payloads
-
 try:
+    import jsonschema  # noqa: F401
+except ImportError:
+    print(
+        "[SYSTEM] Missing jsonschema. Forcing stubs to prevent boot crash.",
+        flush=True,
+    )
+    sys.modules["jsonschema"] = types.ModuleType("jsonschema")
+
+_GARAK_BOOT_OK = False
+try:
+    import garak  # noqa: F401 — parent package before submodules
+    import garak.payloads
+
     if not hasattr(garak.payloads, "Payload"):
         garak.payloads.Payload = type("Payload", (), {"payload_list": {}})
     if not hasattr(garak.payloads.Payload, "payload_list"):
         garak.payloads.Payload.payload_list = {}
     if "whois_injection_contexts" not in garak.payloads.Payload.payload_list:
-        garak.payloads.Payload.payload_list["whois_injection_contexts"] = {"path": "dummy"}
+        garak.payloads.Payload.payload_list["whois_injection_contexts"] = {
+            "path": "dummy"
+        }
+    _GARAK_BOOT_OK = True
     print("[SYSTEM] Garak KeyError Shield: SEALED.")
 except Exception as e:
-    print(f"[SYSTEM] Garak Shield bypass logic engaged via fallback: {e}")
+    print(f"[SYSTEM] Garak catalogue shielded at boot: {e}", flush=True)
 
 # #region agent log
 _agent_debug_log(
     "garak_catalog.py:boot",
     "garak shield applied",
-    {"python": sys.version.split()[0], "has_plugins": hasattr(garak, "plugins")},
-    "H1-py311-garak-boot",
+    {
+        "python": sys.version.split()[0],
+        "garak_boot_ok": _GARAK_BOOT_OK,
+        "has_jsonschema": "jsonschema" in sys.modules,
+    },
+    "H1-jsonschema-garak-boot",
 )
 # #endregion
-
-import importlib
-import inspect
-import logging
-import pkgutil
-import re
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
-
-logger = logging.getLogger(__name__)
 
 # Build-time floor (Docker/nixpacks) — Garak cold-starts without full runtime env
 COLD_START_MIN_PROBES = 100
