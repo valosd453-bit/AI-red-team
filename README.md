@@ -2,13 +2,13 @@
 
 An AI red-teaming framework and FastAPI orchestrator for adversarial testing and security assessment of large language models. Powers ForgeGuard scan execution (kinetic strikes, Garak probes, Groq Brain).
 
-**Deploy target:** [Railway](https://railway.app) via Nixpacks (`nixpacks.toml`).
+**Deploy target:** [Railway](https://railway.app) via **Railpack** (`runtime.txt`, `mise.toml`, `railway.toml`). Legacy `nixpacks.toml` is kept for reference if you switch builders in the dashboard.
 
 | Item | Value |
 |------|--------|
 | Entry | `uvicorn main:app` → [`agathon/orchestrator.py`](agathon/orchestrator.py) |
 | Port | `$PORT` (injected by Railway) |
-| Build | Nixpacks only — no Dockerfile |
+| Build | Railpack + mise (`python-3.11` in `runtime.txt`; `python.github_attestations = false` in `mise.toml`) |
 
 ### Required environment variables
 

@@ -1,0 +1,7 @@
+# Railpack uses mise to install Python from runtime.txt.
+# Disable attestation verification (mise 2026.6 fails on python@3.11.9 without this).
+[settings]
+python.github_attestations = false
+
+[tools]
+python = "3.11"
