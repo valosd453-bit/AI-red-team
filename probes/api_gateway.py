@@ -17,6 +17,11 @@ _ID_PATTERNS = (
     re.compile(r"/(?:orders|order|accounts|account|resources|resource)/(\d+)", re.I),
     re.compile(r"/(?:v\d+/)?(?:users|items|accounts)/(\d+)", re.I),
     re.compile(r"[?&](?:id|user_id|order_id)=(\d+)", re.I),
+    re.compile(
+        r"/(?:api/)?(?:user|users|profile|profiles)/"
+        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+        re.I,
+    ),
 )
 
 
@@ -69,21 +74,28 @@ async def run_api_gateway_probes(state: "AgathonState") -> List[Dict[str, Any]]:
         ]
 
     baseline_body = ""
+    exfiltration_hits = 0
     for probe_url in candidates[:12]:
         try:
             resp = await utc.request_async("GET", probe_url)
             body_snippet = (resp.text or "")[:300]
-            tested_id = None
+            tested_id: str | int | None = None
             for pat in _ID_PATTERNS:
                 m = pat.search(probe_url)
                 if m:
-                    tested_id = int(m.group(1))
+                    raw_id = m.group(1)
+                    try:
+                        tested_id = int(raw_id)
+                    except (TypeError, ValueError):
+                        tested_id = raw_id
                     break
             idor_hit = (
                 resp.status_code == 200
                 and len(resp.text or "") > 20
                 and probe_url.rstrip("/") != url.rstrip("/")
             )
+            if idor_hit and baseline_body and body_snippet != baseline_body:
+                exfiltration_hits += 1
             evidence = {
                 "baseline_id": seed,
                 "tested_id": tested_id,
@@ -129,5 +141,18 @@ async def run_api_gateway_probes(state: "AgathonState") -> List[Dict[str, Any]]:
                     "evidence": str(exc)[:200],
                 }
             )
+
+    if exfiltration_hits >= 2:
+        findings.append(
+            {
+                "surface": "API GATEWAY",
+                "vector": "API_GATEWAY",
+                "probe": "bola_hidden_user_exfiltration",
+                "success": True,
+                "severity": "critical",
+                "category": "idor",
+                "evidence": f"cross_user_responses={exfiltration_hits}",
+            }
+        )
 
     return findings

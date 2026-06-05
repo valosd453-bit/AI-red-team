@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, TYPE_CHECKING
 
@@ -76,26 +77,32 @@ async def run_chat_bot_probes(state: "AgathonState") -> List[Dict[str, Any]]:
         from probes.pyrit_adapter import PYRIT_SCENARIOS, run_pyrit_probe
 
         llm = utc._llm()
-        for spec in PYRIT_SCENARIOS[:2]:
-            try:
-                result = run_pyrit_probe(
-                    llm,
-                    registry_name=spec["name"],
-                    category=spec["category"],
-                )
-                findings.append(
-                    {
-                        "surface": "CHAT BOT",
-                        "vector": "CHAT_BOT",
-                        "probe": spec["name"],
-                        "category": spec["category"],
-                        "success": bool(getattr(result, "success", False)),
-                        "severity": getattr(result, "severity", "info"),
-                        "evidence": (getattr(result, "response", "") or "")[:500],
-                    }
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("[chat_bot] pyrit %s skipped: %s", spec["name"], exc)
+
+        def _pyrit_batch() -> List[Dict[str, Any]]:
+            batch: List[Dict[str, Any]] = []
+            for spec in PYRIT_SCENARIOS[:2]:
+                try:
+                    result = run_pyrit_probe(
+                        llm,
+                        registry_name=spec["name"],
+                        category=spec["category"],
+                    )
+                    batch.append(
+                        {
+                            "surface": "CHAT BOT",
+                            "vector": "CHAT_BOT",
+                            "probe": spec["name"],
+                            "category": spec["category"],
+                            "success": bool(getattr(result, "success", False)),
+                            "severity": getattr(result, "severity", "info"),
+                            "evidence": (getattr(result, "response", "") or "")[:500],
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[chat_bot] pyrit %s skipped: %s", spec["name"], exc)
+            return batch
+
+        findings.extend(await asyncio.to_thread(_pyrit_batch))
     except ImportError:
         pass
 

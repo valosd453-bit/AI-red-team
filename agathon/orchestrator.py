@@ -2263,6 +2263,7 @@ async def _brain_loop(state: AgathonState) -> None:
     messages: List[Dict[str, Any]] = [system_msg, kickoff]
 
     await _emit_brain_transcript(state, role="user", content=kickoff["content"])
+    await _bump_progress(state, 80, phase="brain_loop_start")
 
     MAX_BRAIN_TURNS = 40  # hard cap — force-seals after N turns to prevent runaway scans
 

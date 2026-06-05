@@ -95,6 +95,53 @@ def _run_ai_model_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
     if not strikes:
         strikes = get_kinetic_battery_strikes()[:6]
 
+    # Full Garak catalogue — capped batch so event loop stays responsive via to_thread.
+    _GARAK_BATCH_CAP = 64
+    try:
+        from agathon.garak_catalog import discover_garak_probes, hot_reload_garak_catalog
+
+        hot_reload_garak_catalog(
+            scan_api_key=state.api_key or "",
+            target_url=state.target_url or "",
+        )
+        catalog_specs = discover_garak_probes()[:_GARAK_BATCH_CAP]
+        seen_names = {s[0] for s in strikes}
+        for spec in catalog_specs:
+            if spec.registry_name in seen_names:
+                continue
+            seen_names.add(spec.registry_name)
+            parts = spec.registry_name.split(".")
+            if len(parts) < 3:
+                continue
+            try:
+                result = run_garak_probe(
+                    llm_client,
+                    state.target_model,
+                    probe_module=parts[1],
+                    probe_class=parts[2],
+                    category=spec.category,
+                    registry_name=spec.registry_name,
+                )
+                findings.append(
+                    {
+                        "surface": "LLM ENDPOINT",
+                        "vector": "AI_MODEL",
+                        "probe": spec.registry_name,
+                        "category": spec.category,
+                        "success": bool(getattr(result, "success", False)),
+                        "severity": getattr(result, "severity", "info"),
+                        "evidence": (getattr(result, "response", "") or "")[:500],
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "[ai_model] catalog probe %s skipped: %s",
+                    spec.registry_name,
+                    exc,
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ai_model] garak catalog batch skipped: %s", exc)
+
     for registry_name, category in strikes:
         try:
             parts = registry_name.split(".")

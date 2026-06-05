@@ -29,6 +29,10 @@ _HIDDEN_PATHS = (
 _HREF_RE = re.compile(r"""href\s*=\s*['"]([^'"]+)['"]""", re.I)
 _FORM_RE = re.compile(r"""action\s*=\s*['"]([^'"]+)['"]""", re.I)
 _FETCH_RE = re.compile(r"""fetch\s*\(\s*['"]([^'"]+)['"]""", re.I)
+_API_GATEWAY_RE = re.compile(
+    r"""(?:fetch|axios\.(?:get|post)|api\.(?:get|post))\s*\(\s*['"]([^'"]+/api[^'"]*)['"]""",
+    re.I,
+)
 
 
 def _logic_discovery_sync(url: str, auth_header: str) -> List[Dict[str, Any]]:
@@ -53,10 +57,23 @@ def _logic_discovery_sync(url: str, auth_header: str) -> List[Dict[str, Any]]:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=20_000)
             html = page.content()
-            for pattern in (_HREF_RE, _FORM_RE, _FETCH_RE):
+            for pattern in (_HREF_RE, _FORM_RE, _FETCH_RE, _API_GATEWAY_RE):
                 for match in pattern.findall(html):
                     if match.startswith("/") or match.startswith("http"):
                         discovered.add(urljoin(origin, match))
+
+            gateway_hits = [
+                u for u in discovered if "/api" in u.lower() or "graphql" in u.lower()
+            ]
+            if gateway_hits:
+                findings.append(
+                    {
+                        "probe": "client_gateway_logic_hole",
+                        "success": len(gateway_hits) >= 2,
+                        "severity": "medium" if len(gateway_hits) >= 2 else "info",
+                        "evidence": f"client_api_endpoints={gateway_hits[:12]}",
+                    }
+                )
 
             for hidden in _HIDDEN_PATHS:
                 test_url = urljoin(origin, hidden)
