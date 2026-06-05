@@ -9,15 +9,13 @@ from typing import Any, Callable, Dict, Optional
 
 log = logging.getLogger(__name__)
 
+# Production scan_logs_type_kinetic_check — only these five values are accepted.
 ALLOWED_LOG_TYPES = frozenset({
     "info",
     "thought",
     "strike",
     "breach",
     "finance",
-    "defense",
-    "webhook",
-    "throttle",
 })
 
 LEGACY_LOG_TYPE_MAP: Dict[str, str] = {
@@ -26,16 +24,16 @@ LEGACY_LOG_TYPE_MAP: Dict[str, str] = {
     "error": "info",
     "progress": "info",
     "report": "info",
+    "elite8": "info",
+    "webhook": "info",
+    "throttle": "info",
+    "defense": "info",
     "cost_event": "finance",
     "brain_decision": "thought",
     "attempt": "strike",
     "finding": "breach",
     "tool_run": "strike",
     "tool_authored": "thought",
-    "throttle": "throttle",
-    "webhook": "webhook",
-    "defense": "defense",
-    # kinetic vocabulary passes through
     "thought": "thought",
     "strike": "strike",
     "breach": "breach",

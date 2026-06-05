@@ -3,6 +3,8 @@ import os
 import uvicorn
 from agathon.orchestrator import app
 
+print("[SOVEREIGN] Agathon Engine Active. All pathways isolated.", flush=True)
+
 
 def _boot_garak_hot_reload() -> None:
     """Re-awaken full Garak arsenal on every process start (Railway live env)."""
