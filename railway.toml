@@ -3,7 +3,7 @@
 
 [build]
 builder = "RAILPACK"
-buildCommand = "pip install -r requirements.txt && pip install -r requirements-arsenal.txt --no-deps && playwright install chromium --with-deps"
+buildCommand = "pip install -r requirements.txt && pip install -r requirements-arsenal.txt --no-deps && pip install httpx==0.27.2 --force-reinstall && playwright install chromium --with-deps"
 
 [build.env]
 MISE_PYTHON_GITHUB_ATTESTATIONS = "false"

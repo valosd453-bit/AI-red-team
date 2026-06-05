@@ -40,9 +40,8 @@ class Config:
             "url": "https://api.groq.com/openai/v1/chat/completions",
             "models": [
                 "llama-3.3-70b-versatile",
+                "llama-3.1-70b-versatile",
                 "llama-3.1-8b-instant",
-                "openai/gpt-oss-20b",
-                "openai/gpt-oss-120b",
                 "groq/compound",
                 "groq/compound-mini",
             ],
@@ -54,13 +53,10 @@ class Config:
     VALID_GROQ_MODELS = [
         # Primary brain model used by Agathon orchestrator
         "llama-3.3-70b-versatile",
+        "llama-3.1-70b-versatile",
         # Fast inference models
         "llama-3.1-8b-instant",
         "meta-llama/llama-4-scout-17b-16e-instruct",
-        # Other Groq-served models
-        "openai/gpt-oss-20b",
-        "openai/gpt-oss-120b",
-        "openai/gpt-oss-safeguard-20b",
         "groq/compound",
         "groq/compound-mini",
         "qwen/qwen3-32b",

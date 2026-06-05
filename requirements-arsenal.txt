@@ -2,5 +2,7 @@
 # Transitive deps garak needs when installed with --no-deps:
 jsonschema==4.21.1
 jsonref==1.1.0
+colorama==0.4.6
+xdg-base-dirs==6.0.1
 garak==0.10.3.1
 litellm==1.41.21

@@ -30,6 +30,26 @@ STRICT_PAYLOAD_KEYS = frozenset({"model", "messages", "temperature", "max_tokens
 
 SOVEREIGN_STRIKE_BACKOFF_S = 5.0
 
+_GROQ_FALLBACK_MODELS: tuple[str, ...] = (
+    "llama-3.3-70b-versatile",
+    "llama-3.1-70b-versatile",
+    "llama-3.1-8b-instant",
+)
+
+
+def _strike_model_candidates(
+    model: str, target_url: str, target_provider: str
+) -> list[str]:
+    """Primary model first; Groq 404s retry known-live fallbacks."""
+    primary = (model or "gpt-4o-mini").strip()
+    if resolve_target_provider(target_url, target_provider) != "groq":
+        return [primary]
+    out: list[str] = []
+    for candidate in (primary, *_GROQ_FALLBACK_MODELS):
+        if candidate and candidate not in out:
+            out.append(candidate)
+    return out or [primary]
+
 _ENGINE_KEY_ENVS = (
     "GROQ_API_KEY",
     "OPENROUTER_API_KEY",
@@ -169,59 +189,77 @@ class WeaponLLMClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        body = build_strict_chat_payload(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature if temperature is not None else 0.4,
-            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
-            extra=kwargs or None,
+        model_candidates = _strike_model_candidates(
+            self.model, self.base_url, self.target_provider
         )
 
         max_attempts = 5
         base_delay = 2.0
         cap_delay = 60.0
 
-        for attempt in range(max_attempts):
-            try:
-                r = requests.post(url, headers=headers, json=body, timeout=self.timeout)
-            except requests.RequestException as e:
-                if attempt < max_attempts - 1:
-                    time.sleep(min(cap_delay, base_delay * (2 ** attempt)))
-                    continue
-                return f"[transport-error] {type(e).__name__}: {e}"
+        for model_name in model_candidates:
+            body = build_strict_chat_payload(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature if temperature is not None else 0.4,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+                extra=kwargs or None,
+            )
 
-            if r.status_code in (429, 503) and attempt < max_attempts - 1:
-                delay = max(
-                    SOVEREIGN_STRIKE_BACKOFF_S,
-                    min(cap_delay, base_delay * (2 ** attempt)),
-                )
-                delay += random.uniform(0, delay * 0.2)
-                time.sleep(delay)
-                continue
-
-            if r.status_code >= 400:
+            for attempt in range(max_attempts):
                 try:
-                    err = r.json()
-                except Exception:  # noqa: BLE001
-                    err = {"text": r.text[:500]}
-                log.warning(
-                    "[strike] HTTP %s model=%s url=%s key=%s",
-                    r.status_code,
-                    self.model,
-                    self.base_url,
-                    _mask_key(self.api_key),
-                )
-                return f"[http-{r.status_code}] {json.dumps(err)[:500]}"
+                    r = requests.post(
+                        url, headers=headers, json=body, timeout=self.timeout
+                    )
+                except requests.RequestException as e:
+                    if attempt < max_attempts - 1:
+                        time.sleep(min(cap_delay, base_delay * (2 ** attempt)))
+                        continue
+                    return f"[transport-error] {type(e).__name__}: {e}"
 
-            try:
-                data = r.json()
-                choices = data.get("choices") or []
-                if not choices:
-                    return "[empty-response]"
-                msg = choices[0].get("message", {})
-                return str(msg.get("content") or "")
-            except Exception as e:  # noqa: BLE001
-                return f"[parse-error] {e}: {r.text[:300]}"
+                if r.status_code in (429, 503) and attempt < max_attempts - 1:
+                    delay = max(
+                        SOVEREIGN_STRIKE_BACKOFF_S,
+                        min(cap_delay, base_delay * (2 ** attempt)),
+                    )
+                    delay += random.uniform(0, delay * 0.2)
+                    time.sleep(delay)
+                    continue
+
+                if r.status_code == 404 and model_name != model_candidates[-1]:
+                    log.warning(
+                        "[strike] HTTP 404 model=%s — trying fallback",
+                        model_name,
+                    )
+                    break
+
+                if r.status_code >= 400:
+                    try:
+                        err = r.json()
+                    except Exception:  # noqa: BLE001
+                        err = {"text": r.text[:500]}
+                    log.warning(
+                        "[strike] HTTP %s model=%s url=%s key=%s",
+                        r.status_code,
+                        model_name,
+                        self.base_url,
+                        _mask_key(self.api_key),
+                    )
+                    return f"[http-{r.status_code}] {json.dumps(err)[:500]}"
+
+                if model_name != self.model:
+                    self.model = model_name
+                    log.info("[strike] Groq model fallback active: %s", model_name)
+
+                try:
+                    data = r.json()
+                    choices = data.get("choices") or []
+                    if not choices:
+                        return "[empty-response]"
+                    msg = choices[0].get("message", {})
+                    return str(msg.get("content") or "")
+                except Exception as e:  # noqa: BLE001
+                    return f"[parse-error] {e}: {r.text[:300]}"
 
         return f"[http-429] rate limit persisted after {max_attempts} attempts"
 

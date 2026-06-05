@@ -377,13 +377,58 @@ def _get_supabase_admin():
     global _supabase_admin_client
     if _supabase_admin_client is not None:
         return _supabase_admin_client
+    import httpx
     from supabase import create_client  # type: ignore
 
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
         raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing")
-    _supabase_admin_client = create_client(url, key)
+    try:
+        _supabase_admin_client = create_client(url, key)
+        # #region agent log
+        try:
+            with open("debug-c20499.log", "a", encoding="utf-8") as _fh:
+                _fh.write(
+                    json.dumps(
+                        {
+                            "sessionId": "c20499",
+                            "location": "orchestrator.py:_get_supabase_admin",
+                            "message": "supabase client ok",
+                            "data": {
+                                "httpx": getattr(httpx, "__version__", "?"),
+                            },
+                            "timestamp": int(time.time() * 1000),
+                            "hypothesisId": "H3-supabase-proxy-fix",
+                            "runId": "post-fix",
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
+    except TypeError as exc:
+        if "proxy" not in str(exc):
+            raise
+        log.warning(
+            "[supabase] create_client proxy mismatch — retrying with bare httpx client: %s",
+            exc,
+        )
+        http_client = httpx.Client(timeout=60.0)
+        try:
+            from supabase.lib.client_options import ClientOptions
+
+            options = ClientOptions(
+                postgrest_client_timeout=60,
+                storage_client_timeout=60,
+            )
+            _supabase_admin_client = create_client(url, key, options)
+        except Exception:
+            _supabase_admin_client = create_client(url, key)
+        finally:
+            with suppress(Exception):
+                http_client.close()
     return _supabase_admin_client
 
 
