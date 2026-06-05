@@ -1371,17 +1371,21 @@ async def _judge_breach_finance(
             ),
             asset_value_usd=asset_val,
         )
+        from .financial_judge import format_usd_for_db
+
         out = empty.copy()
         if kinetic.breach and kinetic.financial_liability_usd > 0:
-            out["financial_liability_usd"] = kinetic.financial_liability_usd
-            out["ale_usd"] = kinetic.financial_liability_usd
+            out["financial_liability_usd"] = format_usd_for_db(
+                kinetic.financial_liability_usd
+            )
+            out["ale_usd"] = format_usd_for_db(kinetic.financial_liability_usd)
         out["remediation"] = kinetic.remediation_code_snippet
         out["summary"] = sanitize_text_for_transport(kinetic.executive_summary)
         out["executive_summary"] = kinetic.executive_summary
         out["technical_proof_of_concept"] = kinetic.technical_proof_of_concept
         out["remediation_code_snippet"] = kinetic.remediation_code_snippet
-        out["financial_liability_report"] = kinetic.to_dict()
-        out["kinetic_finding_report"] = kinetic.to_dict()
+        out["financial_liability_report"] = kinetic.to_db_dict()
+        out["kinetic_finding_report"] = kinetic.to_db_dict()
         return out
 
     return await asyncio.to_thread(_call)
@@ -1569,6 +1573,7 @@ async def _run_kinetic_vectors(state: AgathonState) -> None:
                 payload["ale_usd"] = finance.get("ale_usd")
             if finance.get("executive_summary"):
                 payload["executive_summary"] = finance["executive_summary"]
+                payload["executive_summary_md"] = finance["executive_summary"]
             if finance.get("technical_proof_of_concept"):
                 payload["technical_proof_of_concept"] = finance["technical_proof_of_concept"]
             if finance.get("remediation_code_snippet"):
@@ -1577,6 +1582,14 @@ async def _run_kinetic_vectors(state: AgathonState) -> None:
                 payload["kinetic_finding_report"] = finance["kinetic_finding_report"]
             if finance.get("remediation"):
                 payload["remediation"] = finance["remediation"]
+            await _notify_vector_breach_webhook(
+                state,
+                probe_name=probe_name,
+                vector_label=vector_label,
+                surface_kind=kind,
+                severity=sev,
+                payload=payload,
+            )
 
         state.attacks_run += 1
         state.findings.append(
@@ -2895,23 +2908,6 @@ async def run_scan(state: AgathonState) -> None:
                 "adaptive_delay_s": SOVEREIGN_PROBE_DELAY_ADAPTIVE_S,
             },
         )
-    if not _HOT_RELOAD_DONE:
-        try:
-            from . import kinetic_strike
-            from .garak_catalog import get_kinetic_battery_strikes, hot_reload_garak_catalog
-
-            await asyncio.to_thread(
-                hot_reload_garak_catalog,
-                state.api_key,
-                state.target_url,
-            )
-            kinetic_strike.KINETIC_BATTERY = await asyncio.to_thread(
-                get_kinetic_battery_strikes
-            )
-            _HOT_RELOAD_DONE = True
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[registry] hot reload on first scan skipped: %s", exc)
-
     await _STATE.put(state)
     await _update_scan_row(
         state,
@@ -2951,6 +2947,37 @@ async def run_scan(state: AgathonState) -> None:
                 )
             else:
                 await _bump_progress(state, 5, phase="preflight_ok")
+                if not _HOT_RELOAD_DONE:
+                    try:
+                        from . import kinetic_strike
+                        from .garak_catalog import (
+                            get_kinetic_battery_strikes,
+                            hot_reload_garak_catalog,
+                        )
+
+                        await asyncio.to_thread(
+                            hot_reload_garak_catalog,
+                            state.api_key,
+                            state.target_url,
+                        )
+                        kinetic_strike.KINETIC_BATTERY = await asyncio.to_thread(
+                            get_kinetic_battery_strikes
+                        )
+                        _HOT_RELOAD_DONE = True
+                        await _emit_scan_log(
+                            state,
+                            log_type="info",
+                            severity="info",
+                            attack_name="garak_hot_reload",
+                            payload={
+                                "message": "Garak catalogue hot_reload after preflight",
+                                "phase": "post_preflight",
+                            },
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "[registry] hot reload after preflight skipped: %s", exc
+                        )
                 await _run_kinetic_vectors(state)
                 await _run_kinetic_battery(state)
                 await _brain_loop(state)
@@ -3071,6 +3098,93 @@ async def run_scan(state: AgathonState) -> None:
     await _STATE.drop(state.scan_id)
 
 
+async def _notify_vector_breach_webhook(
+    state: AgathonState,
+    *,
+    probe_name: str,
+    vector_label: str,
+    surface_kind: str,
+    severity: str,
+    payload: Dict[str, Any],
+) -> None:
+    """POST incremental breach to ForgeGuard when any kinetic vector finds a hit."""
+    callback = (
+        os.environ.get("AGATHON_WEBHOOK_CALLBACK_URL")
+        or "https://www.forgeguard-ai.com/api/v1/webhooks/agathon"
+    ).strip()
+    secret = (
+        os.environ.get("AGATHON_WEBHOOK_SECRET")
+        or os.environ.get("INTERNAL_SCAN_TOKEN")
+        or os.environ.get("AGATHON_INTERNAL_SECRET")
+    )
+    if not secret:
+        return
+
+    from .financial_judge import format_usd_for_db
+
+    import requests as _requests
+
+    exec_md = (
+        payload.get("executive_summary_md")
+        or payload.get("executive_summary")
+        or payload.get("summary")
+        or f"{vector_label} breach via {probe_name}."
+    )
+    poc = payload.get("technical_proof_of_concept") or payload.get("response_excerpt")
+    aegis = payload.get("remediation_code_snippet") or payload.get("remediation")
+    ale = format_usd_for_db(
+        payload.get("financial_liability_usd") or payload.get("ale_usd")
+    )
+
+    body = {
+        "kind": "scan.vector.breach",
+        "scan_id": state.scan_id,
+        "payload": {
+            "status": "probing",
+            "progress_pct": str(int(state.progress_pct or 0)),
+            "surface_kind": surface_kind,
+            "vector": vector_label,
+            "probe": probe_name,
+            "severity": severity.upper(),
+            "executive_summary": exec_md,
+            "executive_summary_md": exec_md,
+            "technical_proof_of_concept": poc,
+            "remediation_code_snippet": aegis,
+            "financial_liability_usd": ale,
+            "ale_usd": ale,
+            "attacks_run": str(int(state.attacks_run or 0)),
+            "finding": prepare_outbound_payload(payload),
+        },
+    }
+
+    def _post() -> tuple[int, str]:
+        resp = _requests.post(
+            callback,
+            json=body,
+            headers={
+                "Authorization": f"Bearer {secret}",
+                "Content-Type": "application/json",
+            },
+            timeout=10,
+        )
+        return resp.status_code, (resp.text or "")[:400]
+
+    status_code, body_snippet = await asyncio.to_thread(_post)
+    await _emit_scan_log(
+        state,
+        log_type="webhook",
+        severity="info" if 200 <= status_code < 300 else "high",
+        attack_name="vector_breach_webhook",
+        payload={
+            "message": f"Vector breach webhook HTTP {status_code}",
+            "probe": probe_name,
+            "vector": vector_label,
+            "status_code": status_code,
+            "body": body_snippet,
+        },
+    )
+
+
 async def _notify_agathon_webhook(
     state: AgathonState,
     *,
@@ -3095,6 +3209,8 @@ async def _notify_agathon_webhook(
     )
     if not secret:
         return
+
+    from .financial_judge import format_usd_for_db
 
     import requests as _requests
 
@@ -3164,10 +3280,11 @@ async def _notify_agathon_webhook(
             "wall_seconds": str(int(state.wall_seconds())),
             "technical_report_md": technical_md or exec_summary or "",
             "executive_summary": exec_summary,
+            "executive_summary_md": exec_summary,
             "technical_proof_of_concept": poc,
             "remediation_code_snippet": top_breach.get("remediation_code_snippet"),
-            "financial_liability_usd": str(ale_usd) if ale_usd is not None else None,
-            "ale_usd": str(ale_usd) if ale_usd is not None else None,
+            "financial_liability_usd": format_usd_for_db(ale_usd),
+            "ale_usd": format_usd_for_db(ale_usd),
             "overall_cvss": str(report.get("overall_cvss", 0)) if report else "0",
             "overall_severity": overall_sev,
             "findings": prepare_outbound_payload(

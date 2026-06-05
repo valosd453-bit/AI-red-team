@@ -16,6 +16,14 @@ logger = logging.getLogger(__name__)
 
 _PRIORITY = frozenset({"prompt_injection", "jailbreak", "pii_leak"})
 
+# Explicit kinetic labels for Prompt Hijacker + Jailbreak (Garak + PyRIT).
+_HIJACKER_PROBES: tuple[tuple[str, str, str], ...] = (
+    ("garak.prompt_injection.hijacker", "prompt_injection", "Prompt Hijacker"),
+    ("garak.jailbreak.dan_mode", "jailbreak", "Jailbreak"),
+    ("garak.prompt_injection.translate_leak", "prompt_injection", "Prompt Hijacker"),
+    ("garak.jailbreak.hypothetical", "jailbreak", "Jailbreak"),
+)
+
 
 def _run_ai_model_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
     """Sync Garak/PyRIT probe loop — run via asyncio.to_thread from async callers."""
@@ -31,9 +39,55 @@ def _run_ai_model_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
     try:
         from probes.garak import run_garak_probe
         from probes.pyrit_adapter import PYRIT_SCENARIOS, run_pyrit_probe
+        from agathon.garak_runner import CURATED_VECTORS, run_garak_category
     except ImportError:
         logger.warning("[ai_model] probe imports unavailable")
         return findings
+
+    for registry_name, category, label in _HIJACKER_PROBES:
+        try:
+            result = run_garak_category(
+                llm_client,
+                state.target_model,
+                category=category,
+            )
+            findings.append(
+                {
+                    "surface": "LLM ENDPOINT",
+                    "vector": "AI_MODEL",
+                    "probe": registry_name,
+                    "category": category,
+                    "strike_label": label,
+                    "success": bool(getattr(result, "success", False)),
+                    "severity": getattr(result, "severity", "info"),
+                    "evidence": (getattr(result, "response", "") or "")[:500],
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            curated = CURATED_VECTORS.get(category, [])
+            if curated:
+                prompt = curated[0]
+                try:
+                    response = llm_client.generate_response(prompt)
+                    from agathon.garak_runner import _looks_like_breach
+
+                    hit = _looks_like_breach(response or "")
+                    findings.append(
+                        {
+                            "surface": "LLM ENDPOINT",
+                            "vector": "AI_MODEL",
+                            "probe": registry_name,
+                            "category": category,
+                            "strike_label": label,
+                            "success": hit,
+                            "severity": "high" if hit else "info",
+                            "evidence": (response or "")[:500],
+                        }
+                    )
+                except Exception as inner:  # noqa: BLE001
+                    logger.debug("[ai_model] hijacker %s skipped: %s", registry_name, inner)
+            else:
+                logger.debug("[ai_model] hijacker %s skipped: %s", registry_name, exc)
 
     strikes = [
         s for s in get_kinetic_battery_strikes() if s[1] in _PRIORITY
@@ -76,7 +130,11 @@ def _run_ai_model_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
         except Exception as exc:  # noqa: BLE001
             logger.debug("[ai_model] garak probe %s skipped: %s", registry_name, exc)
 
-    for spec in PYRIT_SCENARIOS[:2]:
+    pyrit_hijack = [
+        s for s in PYRIT_SCENARIOS
+        if s["category"] in ("prompt_injection", "jailbreak")
+    ][:4]
+    for spec in pyrit_hijack or PYRIT_SCENARIOS[:2]:
         try:
             result = run_pyrit_probe(
                 llm_client,
@@ -101,5 +159,14 @@ def _run_ai_model_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
 
 
 async def run_ai_model_probes(state: "AgathonState") -> List[Dict[str, Any]]:
-    """Run Garak/PyRIT probes without blocking the orchestrator event loop."""
-    return await asyncio.to_thread(_run_ai_model_probes_sync, state)
+    """Application Logic first, then Garak/PyRIT off the event loop thread."""
+    from probes.application_logic import run_application_logic_probes
+
+    findings: List[Dict[str, Any]] = []
+    try:
+        findings.extend(await run_application_logic_probes(state))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ai_model] application_logic probes failed: %s", exc)
+
+    findings.extend(await asyncio.to_thread(_run_ai_model_probes_sync, state))
+    return findings

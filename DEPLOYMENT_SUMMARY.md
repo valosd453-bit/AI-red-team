@@ -56,7 +56,7 @@ The repository contains a comprehensive AI red-teaming framework:
 
 **Configuration**:
 - `config.py` - Framework settings
-- `requirements-agathon.txt` - Dependencies
+- `requirements.txt` - Unified hard-pinned dependencies (single source)
 
 ### 5. Git Configuration
 

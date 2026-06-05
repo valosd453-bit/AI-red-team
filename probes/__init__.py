@@ -1,5 +1,10 @@
 """
-Attack probe cores — Garak (400+) and surface-kind dispatchers.
+Kinetic vector dispatch — four surface kinds (probes/ at repo root).
+
+  llm    -> probes.ai_model      (Garak + PyRIT Prompt Hijacker / Jailbreak)
+  web    -> probes.web_app       (Playwright XSS + Logic Discovery)
+  code   -> probes.api_gateway    (BOLA/IDOR sequential fuzzer)
+  mobile -> probes.chat_bot       (Intent Drift + Tool-Call Injection)
 """
 
 from __future__ import annotations
