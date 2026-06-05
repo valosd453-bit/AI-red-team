@@ -1639,7 +1639,7 @@ async def _run_kinetic_vectors(state: AgathonState) -> None:
         log_type="info",
         severity="info",
         payload={
-            "message": f"Kinetic strike vector starting: {vector_label}",
+            "message": f"Compliance audit vector starting: {vector_label}",
             "surface_kind": kind,
             "vector": vector_label,
         },
@@ -1763,7 +1763,7 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
             log_type="strike",
             severity="info",
             attack_name=strike_name,
-            payload={"message": f"Kinetic strike queued: {category}", "category": category},
+            payload={"message": f"Compliance audit queued: {category}", "category": category},
         )
         entry = {"name": strike_name, "family": f"garak_{category}", "level": "easy"}
         try:
@@ -1806,7 +1806,7 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
                 log_type="info",
                 severity="medium",
                 attack_name=strike_name,
-                payload={"message": f"Kinetic strike error: {type(e).__name__}: {e}"},
+                payload={"message": f"Compliance audit error: {type(e).__name__}: {e}"},
             )
     await _emit_scan_log(
         state,
@@ -1837,7 +1837,7 @@ async def _tool_run_attack(
         log_type="strike",
         severity="info",
         attack_name=name,
-        payload={"rationale": rationale, "message": "Kinetic strike initiated"},
+        payload={"rationale": rationale, "message": "Compliance audit initiated"},
     )
 
     if name.startswith("garak."):
@@ -4319,6 +4319,140 @@ async def forge_execute(req_body: ForgeExecuteRequest) -> JSONResponse:
 # ── Forge kill endpoint ───────────────────────────────────────────────────────
 # Tracks running forge subprocesses by session_id for kill targeting.
 _FORGE_SESSIONS: Dict[str, Any] = {}
+
+
+# ── Sovereign Customs Agent — Bazaar script audit ─────────────────────────────
+
+
+def _log_malicious_script_attempt(
+    admin: Any,
+    *,
+    script_id: str,
+    author_id: Optional[str],
+    findings: List[str],
+) -> None:
+    try:
+        admin.table("attack_logs").insert(
+            {
+                "ip_address": "bazaar-customs",
+                "path": f"/bazaar/audit/{script_id}",
+                "method": "POST",
+                "user_agent": "sovereign-customs-agent",
+                "reason": "Malicious Script Attempt",
+                "metadata": {
+                    "script_id": script_id,
+                    "author_id": author_id,
+                    "findings": findings[:20],
+                    "defense": "bazaar_judge",
+                },
+            }
+        ).execute()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[bazaar/audit] attack_logs insert failed: %s", exc)
+
+
+@app.post(
+    "/bazaar/audit/{script_id}",
+    dependencies=[Depends(_require_internal_secret)],
+)
+async def bazaar_audit_script(script_id: str) -> JSONResponse:
+    """
+    Sovereign Customs Agent — DeepSeek-R1 audit for a bazaar_scripts row.
+
+    Gateway calls this after upload insert. Updates verdict, certification,
+    metadata.remediation_advice, and logs Malicious Script Attempt on reject.
+    """
+    from .bazaar_judge import judge_bazaar_script
+
+    admin = _get_supabase_admin()
+    if admin is None:
+        raise HTTPException(status_code=503, detail="Supabase admin unavailable")
+
+    def _fetch() -> Optional[Dict[str, Any]]:
+        result = (
+            admin.table("bazaar_scripts")
+            .select(
+                "id, author_id, name, description, language, code, code_content, metadata"
+            )
+            .eq("id", script_id)
+            .maybe_single()
+            .execute()
+        )
+        return result.data
+
+    row = await asyncio.to_thread(_fetch)
+    if not row:
+        raise HTTPException(status_code=404, detail="Script not found")
+
+    code = str(row.get("code") or row.get("code_content") or "")
+    language = str(row.get("language") or "python")
+    name = str(row.get("name") or "")
+    description = str(row.get("description") or "")
+    author_id = row.get("author_id")
+
+    def _judge_call() -> Any:
+        judge_fn = None
+        if _HAS_JUDGE and _JUDGE_ROUTER is not None:
+            judge_fn = lambda p, s: _JUDGE_ROUTER.judge(p, s)  # noqa: E731
+        return judge_bazaar_script(
+            code=code,
+            language=language,
+            name=name,
+            description=description,
+            judge_fn=judge_fn,
+        )
+
+    audit = await asyncio.to_thread(_judge_call)
+    verdict = audit.verdict
+    is_cleared = verdict == "cleared"
+    is_rejected = verdict == "rejected"
+
+    existing_meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    merged_meta = {**existing_meta, **audit.metadata}
+    if audit.remediation_advice:
+        merged_meta["remediation_advice"] = audit.remediation_advice
+
+    update_payload: Dict[str, Any] = {
+        "audit_verdict": verdict,
+        "audit_risk_score": audit.risk_score,
+        "audit_findings": audit.findings,
+        "audit_reason": audit.reason,
+        "audited_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "status": audit.status.lower() if audit.status.isupper() else audit.status,
+        "is_certified": is_cleared,
+        "is_published": is_cleared,
+        "metadata": merged_meta,
+    }
+
+    def _persist() -> None:
+        admin.table("bazaar_scripts").update(update_payload).eq("id", script_id).execute()
+        if is_rejected:
+            _log_malicious_script_attempt(
+                admin,
+                script_id=script_id,
+                author_id=str(author_id) if author_id else None,
+                findings=audit.findings or audit.malicious_patterns,
+            )
+
+    await asyncio.to_thread(_persist)
+
+    return JSONResponse(
+        {
+            "ok": not is_rejected,
+            "script_id": script_id,
+            "verdict": verdict,
+            "status": audit.status,
+            "risk_score": audit.risk_score,
+            "findings": audit.findings,
+            "reason": audit.reason,
+            "remediation_advice": audit.remediation_advice,
+            "is_functional_probe": audit.is_functional_probe,
+            "is_certified": is_cleared,
+            "is_published": is_cleared,
+            "metadata": merged_meta,
+        },
+        status_code=422 if is_rejected else 200,
+    )
 
 
 class ForgeKillRequest(BaseModel):
