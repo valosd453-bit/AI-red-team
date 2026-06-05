@@ -98,6 +98,9 @@ from fastapi.responses import JSONResponse  # noqa: E402
 from pydantic import BaseModel, Field, ConfigDict, field_validator  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 
+from .bot_black_hole import install_bot_black_hole  # noqa: E402
+from .ghost_identity import apply_ghost_mask, resolve_display_name  # noqa: E402
+
 # First-party (Ai red/)
 # We reuse the bridge's primitives so the orchestrator and the simple-mode
 # bridge stay in lock-step on attack invocation + severity mapping.
@@ -623,6 +626,7 @@ class AgathonState:
     intensity: Intensity
     api_key: str  # Decrypted by Vercel before POSTing here. Never logged.
     ownership_verified: bool = False
+    is_ghost_active: bool = False
     surface_kind: str = "llm"
     target_provider: str = ""
     asset_value_usd: float = 0.0
@@ -745,6 +749,8 @@ async def _emit_scan_log(
             "payload": payload,
         }
     )
+    if state.is_ghost_active:
+        row = apply_ghost_mask(row, state.user_id)
 
     # 1. Insert into Postgres (off the event loop — supabase-py is sync).
     try:
@@ -1528,6 +1534,18 @@ async def _apply_kinetic_result(
         attack_name=name,
         payload=payload,
     )
+    if is_breach:
+        kind = (state.surface_kind or "llm").strip().lower()
+        vector_label = _VECTOR_LABELS.get(kind, "LLM ENDPOINT")
+        await _maybe_notify_strike_webhook(
+            state,
+            probe_name=name,
+            vector_label=vector_label,
+            surface_kind=kind,
+            severity=sev,
+            payload=payload,
+            success=True,
+        )
     excerpt = str(payload.get("response_excerpt") or payload.get("detail") or "")
     if _is_rate_limited_response(excerpt):
         await _record_rate_limit_event(state, detail=excerpt[:400], source="run_attack")
@@ -1557,6 +1575,57 @@ _VECTOR_LABELS = {
     "code": "API GATEWAY",
     "mobile": "CHAT BOT",
 }
+
+
+async def _maybe_notify_strike_webhook(
+    state: AgathonState,
+    *,
+    probe_name: str,
+    vector_label: str,
+    surface_kind: str,
+    severity: str,
+    payload: Dict[str, Any],
+    success: bool,
+) -> None:
+    """POST kinetic breach to ForgeGuard when a strike succeeds with report sections."""
+    if not success:
+        return
+    if severity in ("info", "low") and not payload.get("financial_liability_usd"):
+        return
+
+    enriched = dict(payload)
+    if not enriched.get("financial_liability_usd"):
+        finance = await _judge_breach_finance(
+            state,
+            attack_name=probe_name,
+            severity=severity,
+            summary=str(enriched.get("summary") or enriched.get("response_excerpt") or "")[:600],
+            category=str(enriched.get("category") or surface_kind),
+            target_response=str(
+                enriched.get("response_excerpt") or enriched.get("evidence") or ""
+            )[:1200],
+        )
+        for key in (
+            "financial_liability_usd",
+            "ale_usd",
+            "executive_summary",
+            "executive_summary_md",
+            "technical_proof_of_concept",
+            "remediation_code_snippet",
+            "remediation",
+            "kinetic_finding_report",
+        ):
+            if finance.get(key) and not enriched.get(key):
+                enriched[key] = finance[key]
+
+    await _notify_vector_breach_webhook(
+        state,
+        probe_name=probe_name,
+        vector_label=vector_label,
+        surface_kind=surface_kind,
+        severity=severity,
+        payload=enriched,
+    )
 
 
 async def _run_kinetic_vectors(state: AgathonState) -> None:
@@ -1627,13 +1696,14 @@ async def _run_kinetic_vectors(state: AgathonState) -> None:
                 payload["kinetic_finding_report"] = finance["kinetic_finding_report"]
             if finance.get("remediation"):
                 payload["remediation"] = finance["remediation"]
-            await _notify_vector_breach_webhook(
+            await _maybe_notify_strike_webhook(
                 state,
                 probe_name=probe_name,
                 vector_label=vector_label,
                 surface_kind=kind,
                 severity=sev,
                 payload=payload,
+                success=success,
             )
 
         state.attacks_run += 1
@@ -3430,6 +3500,8 @@ class IdentityOcrRequest(BaseModel):
     image_base64: str = Field(..., min_length=100)
     mime_type: str = "image/jpeg"
     profile_full_name: str = ""
+    user_id: str = ""
+    is_ghost_active: bool = False
 
 
 class StartScanRequest(BaseModel):
@@ -3448,6 +3520,7 @@ class StartScanRequest(BaseModel):
     target_type: str = Field(default="")
     target_provider: str = Field(default="")
     asset_value_usd: float = Field(default=50000.0)
+    is_ghost_active: bool = False
 
     @field_validator("intensity", mode="before")
     @classmethod
@@ -3483,6 +3556,7 @@ class EscalationDecision(BaseModel):
 
 
 app = FastAPI(title="Agathon Orchestrator", version="0.2.0")
+install_bot_black_hole(app)
 
 
 @app.on_event("startup")
@@ -3597,7 +3671,13 @@ async def identity_ocr(req: IdentityOcrRequest) -> Dict[str, Any]:
         lambda: run_identity_ocr(
             image_base64=req.image_base64,
             mime_type=req.mime_type,
-            profile_full_name=req.profile_full_name,
+            profile_full_name=resolve_display_name(
+                req.profile_full_name,
+                is_ghost_active=req.is_ghost_active,
+                user_id=req.user_id,
+            ),
+            is_ghost_active=req.is_ghost_active,
+            user_id=req.user_id,
         )
     )
     return {"ok": True, **result}
@@ -3631,6 +3711,7 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
         intensity=intensity,
         api_key=req.api_key,
         ownership_verified=bool(req.ownership_verified),
+        is_ghost_active=bool(req.is_ghost_active),
         surface_kind=_resolve_surface_kind(req.target_type, req.surface_kind),
         target_provider=provider,
         asset_value_usd=asset_val,
@@ -3720,7 +3801,10 @@ async def scan_ws(websocket: WebSocket, scan_id: str, token: str = "") -> None:
     # Replay recent_events on connect so the operator sees history.
     for evt in state.recent_events:
         try:
-            await websocket.send_json(prepare_outbound_payload(evt))
+            outbound = prepare_outbound_payload(evt)
+            if state.is_ghost_active:
+                outbound = apply_ghost_mask(outbound, state.user_id)
+            await websocket.send_json(outbound)
         except Exception:  # noqa: BLE001
             break
 

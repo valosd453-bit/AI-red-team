@@ -27,8 +27,12 @@ def run_identity_ocr(
     image_base64: str,
     mime_type: str,
     profile_full_name: str = "",
+    is_ghost_active: bool = False,
+    user_id: str = "",
 ) -> Dict[str, str]:
     """Return ocr_text, extracted_name, audit_notes (all transport-sanitized)."""
+    from .ghost_identity import resolve_display_name
+
     empty = {
         "ocr_text": "",
         "extracted_name": "",
@@ -46,7 +50,13 @@ def run_identity_ocr(
 
     mime = (mime_type or "image/jpeg").strip() or "image/jpeg"
     data_url = f"data:{mime};base64,{b64}"
-    name = sanitize_text_for_transport(profile_full_name or "")
+    name = sanitize_text_for_transport(
+        resolve_display_name(
+            profile_full_name or "",
+            is_ghost_active=is_ghost_active,
+            user_id=user_id,
+        )
+    )
 
     prompt = (
         "You are an identity document OCR engine.\n"

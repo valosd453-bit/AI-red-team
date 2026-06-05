@@ -215,5 +215,24 @@ async def run_ai_model_probes(state: "AgathonState") -> List[Dict[str, Any]]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ai_model] application_logic probes failed: %s", exc)
 
-    findings.extend(await asyncio.to_thread(_run_ai_model_probes_sync, state))
+    try:
+        garak_batch = await asyncio.wait_for(
+            asyncio.to_thread(_run_ai_model_probes_sync, state),
+            timeout=120,
+        )
+        findings.extend(garak_batch)
+    except asyncio.TimeoutError:
+        logger.warning("[ai_model] Garak/PyRIT batch exceeded 120s — partial results retained")
+        findings.append(
+            {
+                "surface": "LLM ENDPOINT",
+                "vector": "AI_MODEL",
+                "probe": "garak_pyrit_timeout_guard",
+                "category": "prompt_injection",
+                "success": False,
+                "severity": "medium",
+                "evidence": "Garak/PyRIT catalogue batch aborted at 120s event-loop guard",
+            }
+        )
+
     return findings

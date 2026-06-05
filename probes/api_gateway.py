@@ -24,6 +24,20 @@ _ID_PATTERNS = (
     ),
 )
 
+_PII_MARKERS = (
+    re.compile(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", re.I),
+    re.compile(r"\b(?:ssn|social.?security)\b", re.I),
+    re.compile(r"\b(?:password|api[_-]?key|secret|token)\s*[:=]", re.I),
+    re.compile(r"\b(?:phone|mobile|msisdn)\b", re.I),
+)
+
+
+def _body_has_hidden_user_data(text: str) -> bool:
+    lower = (text or "").lower()
+    if any(k in lower for k in ("email", "phone", "ssn", "password", "api_key", "secret")):
+        return True
+    return any(p.search(text or "") for p in _PII_MARKERS)
+
 
 def _extract_seed_id(url: str) -> int | None:
     for pat in _ID_PATTERNS:
@@ -94,7 +108,10 @@ async def run_api_gateway_probes(state: "AgathonState") -> List[Dict[str, Any]]:
                 and len(resp.text or "") > 20
                 and probe_url.rstrip("/") != url.rstrip("/")
             )
+            pii_exfil = idor_hit and _body_has_hidden_user_data(resp.text or "")
             if idor_hit and baseline_body and body_snippet != baseline_body:
+                exfiltration_hits += 1
+            if pii_exfil:
                 exfiltration_hits += 1
             evidence = {
                 "baseline_id": seed,
@@ -110,9 +127,9 @@ async def run_api_gateway_probes(state: "AgathonState") -> List[Dict[str, Any]]:
                         "vector": "API_GATEWAY",
                         "probe": "bola_idor_sweep",
                         "success": True,
-                        "severity": "high",
+                        "severity": "critical" if pii_exfil else "high",
                         "category": "idor",
-                        "evidence": str(evidence),
+                        "evidence": str({**evidence, "pii_exfiltration": pii_exfil}),
                     }
                 )
             else:
@@ -142,7 +159,7 @@ async def run_api_gateway_probes(state: "AgathonState") -> List[Dict[str, Any]]:
                 }
             )
 
-    if exfiltration_hits >= 2:
+    if exfiltration_hits >= 1:
         findings.append(
             {
                 "surface": "API GATEWAY",
@@ -151,7 +168,7 @@ async def run_api_gateway_probes(state: "AgathonState") -> List[Dict[str, Any]]:
                 "success": True,
                 "severity": "critical",
                 "category": "idor",
-                "evidence": f"cross_user_responses={exfiltration_hits}",
+                "evidence": f"cross_user_or_pii_responses={exfiltration_hits}",
             }
         )
 
