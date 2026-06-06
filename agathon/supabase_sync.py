@@ -40,15 +40,80 @@ LEGACY_LOG_TYPE_MAP: Dict[str, str] = {
     "finance": "finance",
 }
 
+# Keys that must never reach Postgres / webhooks as nested objects (22P02 guard).
+_SCALAR_TRANSPORT_KEYS = frozenset({
+    "progress_pct",
+    "ale_usd",
+    "financial_liability_usd",
+    "asset_value_usd",
+    "gdpr_fine_usd",
+    "operational_cost_usd",
+    "total_liability_usd",
+})
 
-def stringify_payload_numerics(value: Any) -> Any:
+
+def _extract_scalar_from_object(value: Dict[str, Any], key: str) -> Any:
+    """Pull a numeric leaf from dict-shaped finance/progress payloads."""
+    for candidate in (
+        value.get(key),
+        value.get("value"),
+        value.get("amount"),
+        value.get("usd"),
+        value.get("pct"),
+        value.get("progress_pct"),
+    ):
+        if candidate is not None and not isinstance(candidate, (dict, list)):
+            return candidate
+    return None
+
+
+def coerce_transport_scalar(key: str, value: Any) -> Any:
+    """
+    Coerce progress_pct / ale_usd (and related USD keys) to clean scalars.
+
+    Prevents Postgres 22P02 when nested dicts slip into NUMERIC/INTEGER columns.
+    """
+    if key not in _SCALAR_TRANSPORT_KEYS:
+        return value
+
+    if value is None or value == "":
+        return "0" if key == "progress_pct" else None
+
+    if isinstance(value, dict):
+        value = _extract_scalar_from_object(value, key)
+        if value is None:
+            return "0" if key == "progress_pct" else None
+
+    if isinstance(value, (list, tuple, set)):
+        return "0" if key == "progress_pct" else None
+
+    if key == "progress_pct":
+        try:
+            return str(int(round(float(value))))
+        except (TypeError, ValueError):
+            return "0"
+
+    try:
+        return str(round(float(value), 2))
+    except (TypeError, ValueError):
+        return None
+
+
+def stringify_payload_numerics(value: Any, *, _parent_key: Optional[str] = None) -> Any:
     """
     Cast numeric values in log/finding payloads to strings for Supabase JSON safety.
 
     Scores and CVSS fields are stored as ``str(score)`` per Stronghold contract.
+    ``progress_pct`` and ``ale_usd`` are never emitted as raw objects.
     """
     if isinstance(value, dict):
-        return {k: stringify_payload_numerics(v) for k, v in value.items()}
+        return {
+            k: stringify_payload_numerics(
+                coerce_transport_scalar(k, v) if k in _SCALAR_TRANSPORT_KEYS else v,
+                _parent_key=k,
+            )
+            for k, v in value.items()
+        }
     if isinstance(value, list):
         return [stringify_payload_numerics(item) for item in value]
     if isinstance(value, bool):

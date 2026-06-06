@@ -457,6 +457,24 @@ def _resolve_internal_token() -> Optional[str]:
     )
 
 
+def _resolve_webhook_secret() -> Optional[str]:
+    """Shared secret for outbound ForgeGuard webhook POSTs."""
+    return (
+        os.environ.get("INTERNAL_SCAN_TOKEN")
+        or os.environ.get("AGATHON_WEBHOOK_SECRET")
+        or os.environ.get("AGATHON_INTERNAL_SECRET")
+    )
+
+
+def _webhook_auth_headers(secret: str) -> Dict[str, str]:
+    """Vercel ingress requires x-internal-scan-token; keep Bearer for legacy paths."""
+    return {
+        "Authorization": f"Bearer {secret}",
+        "x-internal-scan-token": secret,
+        "Content-Type": "application/json",
+    }
+
+
 def _validate_bearer(authorization: Optional[str]) -> None:
     """Bearer-auth shared with Vercel. Constant-time compare."""
     expected = _resolve_internal_token()
@@ -3228,11 +3246,7 @@ async def _notify_vector_breach_webhook(
         os.environ.get("AGATHON_WEBHOOK_CALLBACK_URL")
         or "https://www.forgeguard-ai.com/api/v1/webhooks/agathon"
     ).strip()
-    secret = (
-        os.environ.get("AGATHON_WEBHOOK_SECRET")
-        or os.environ.get("INTERNAL_SCAN_TOKEN")
-        or os.environ.get("AGATHON_INTERNAL_SECRET")
-    )
+    secret = _resolve_webhook_secret()
     if not secret:
         return
 
@@ -3277,10 +3291,7 @@ async def _notify_vector_breach_webhook(
         resp = _requests.post(
             callback,
             json=body,
-            headers={
-                "Authorization": f"Bearer {secret}",
-                "Content-Type": "application/json",
-            },
+            headers=_webhook_auth_headers(secret),
             timeout=10,
         )
         return resp.status_code, (resp.text or "")[:400]
@@ -3318,11 +3329,7 @@ async def _notify_agathon_webhook(
         os.environ.get("AGATHON_WEBHOOK_CALLBACK_URL")
         or "https://www.forgeguard-ai.com/api/v1/webhooks/agathon"
     ).strip()
-    secret = (
-        os.environ.get("AGATHON_WEBHOOK_SECRET")
-        or os.environ.get("INTERNAL_SCAN_TOKEN")
-        or os.environ.get("AGATHON_INTERNAL_SECRET")
-    )
+    secret = _resolve_webhook_secret()
     if not secret:
         return
 
@@ -3414,10 +3421,7 @@ async def _notify_agathon_webhook(
         resp = _requests.post(
             callback,
             json=payload,
-            headers={
-                "Authorization": f"Bearer {secret}",
-                "Content-Type": "application/json",
-            },
+            headers=_webhook_auth_headers(secret),
             timeout=10,
         )
         return resp.status_code, (resp.text or "")[:400]
