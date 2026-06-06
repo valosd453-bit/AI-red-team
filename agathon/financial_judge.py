@@ -302,7 +302,7 @@ def judge_kinetic_finding(
             data.get("remediation_code_snippet") or data.get("remediation") or ""
         )[:4000]
 
-        return merge_kinetic_report(
+        report = merge_kinetic_report(
             breach=breach,
             category=category,
             target_response=target_response,
@@ -315,6 +315,23 @@ def judge_kinetic_finding(
             llm_operational_usd=operational,
             llm_records=llm_records,
         )
+        if report.breach and not (report.remediation_code_snippet or "").strip():
+            report = merge_kinetic_report(
+                breach=True,
+                category=category,
+                target_response=target_response,
+                executive_summary=report.executive_summary,
+                severity=report.severity,
+                technical_proof_of_concept=report.technical_proof_of_concept,
+                remediation_code_snippet=(
+                    "regex: ^(?!.*(?i)(ignore previous|system override|maintenance mode)).*$"
+                ),
+                asset_value_usd=asset_val,
+                llm_liability=llm_total,
+                llm_operational_usd=operational,
+                llm_records=llm_records,
+            )
+        return report
     except Exception:  # noqa: BLE001
         return default
 

@@ -274,10 +274,9 @@ def _is_groq_free_tier_strike(state: "AgathonState") -> bool:
 
 
 def _effective_sovereign_delay(state: "AgathonState") -> float:
-    return float(
-        getattr(state, "sovereign_probe_delay_s", SOVEREIGN_PROBE_DELAY_S)
-        or SOVEREIGN_PROBE_DELAY_S
-    )
+    from .pacing_lock import effective_pacing_delay_s
+
+    return effective_pacing_delay_s(state)
 
 
 async def _emit_throttle_log(
@@ -310,21 +309,21 @@ async def _record_rate_limit_event(
     detail: str,
     source: str = "strike",
 ) -> None:
-    """Count 429 events, escalate probe delay 5s→10s, emit throttle breadcrumb."""
+    """Count 429 events, activate Global Pacing Lock (10s × 5), emit throttle breadcrumb."""
+    from .pacing_lock import activate_global_pacing_lock, precision_pacing_pause
+
     state.rate_limit_hits = int(getattr(state, "rate_limit_hits", 0)) + 1
-    if (
-        _is_groq_free_tier_strike(state)
-        and state.rate_limit_hits >= 1
-    ) or state.rate_limit_hits >= RATE_LIMIT_ESCALATE_AFTER:
-        state.sovereign_probe_delay_s = SOVEREIGN_PROBE_DELAY_ADAPTIVE_S
+    activate_global_pacing_lock(state)
     await _emit_throttle_log(state, detail=detail, source=source)
-    await asyncio.sleep(_effective_sovereign_delay(state))
+    await precision_pacing_pause(state)
 
 
 async def _sovereign_probe_pause(state: "AgathonState") -> None:
-    """Gap between kinetic probes — 5s default, 10s after persistent 429s."""
+    """Gap between kinetic probes — 5s default, 10s under Global Pacing Lock."""
+    from .pacing_lock import precision_pacing_pause
+
     if _is_sovereign_scan(state) or _is_groq_free_tier_strike(state):
-        await asyncio.sleep(_effective_sovereign_delay(state))
+        await precision_pacing_pause(state)
 
 
 async def _bump_progress(
@@ -340,6 +339,26 @@ async def _bump_progress(
         return
     state.progress_pct = target
     await _update_scan_row(state, progress_pct=target)
+    # #region agent log
+    try:
+        with open("debug-c20499.log", "a", encoding="utf-8") as _fh:
+            _fh.write(
+                json.dumps(
+                    {
+                        "sessionId": "c20499",
+                        "hypothesisId": "H2-progress-heartbeat",
+                        "location": "orchestrator.py:_bump_progress",
+                        "message": "progress bumped",
+                        "data": {"scan_id": state.scan_id, "pct": target, "phase": phase},
+                        "timestamp": int(time.time() * 1000),
+                        "runId": run_id,
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    # #endregion
     if phase:
         await _emit_scan_log(
             state,
@@ -692,6 +711,7 @@ class AgathonState:
     # Adaptive Groq rate-limit throttling ------------------------------------
     rate_limit_hits: int = 0
     sovereign_probe_delay_s: float = SOVEREIGN_PROBE_DELAY_S
+    pacing_lock_remaining: int = 0
 
     def wall_seconds(self) -> float:
         return time.time() - self.started_at
@@ -812,6 +832,64 @@ async def _update_scan_row(
         )
     except Exception as e:  # noqa: BLE001
         log.error("scans update failed for %s: %s", state.scan_id, e)
+
+
+def sync_probe_heartbeat(state: AgathonState, probe_idx: int) -> None:
+    """Sync DB heartbeat every 3 probes — keeps UI alive during Garak batch."""
+    if probe_idx <= 0 or probe_idx % 3 != 0:
+        return
+    pct = min(20, 6 + (probe_idx // 3))
+    target = max(state.progress_pct, pct)
+    if target <= state.progress_pct:
+        return
+    state.progress_pct = target
+    try:
+        admin = _get_supabase_admin()
+        admin.table("scans").update({"progress_pct": target}).eq(
+            "id", state.scan_id
+        ).execute()
+        # #region agent log
+        with open("debug-c20499.log", "a", encoding="utf-8") as _fh:
+            _fh.write(
+                json.dumps(
+                    {
+                        "sessionId": "c20499",
+                        "hypothesisId": "H2-progress-heartbeat",
+                        "location": "orchestrator.py:sync_probe_heartbeat",
+                        "message": "probe heartbeat persisted",
+                        "data": {"scan_id": state.scan_id, "probe_idx": probe_idx, "pct": target},
+                        "timestamp": int(time.time() * 1000),
+                        "runId": "precision-pacing",
+                    }
+                )
+                + "\n"
+            )
+        # #endregion
+    except Exception as exc:  # noqa: BLE001
+        log.debug("sync_probe_heartbeat failed: %s", exc)
+
+
+async def _persist_remediation_snippet(
+    state: AgathonState, snippet: str
+) -> None:
+    """Upsert Aegis remediation snippet when Judge confirms a breach."""
+    clean = sanitize_text_for_transport(str(snippet or "")[:8000])
+    if not clean:
+        return
+    try:
+        admin = _get_supabase_admin()
+        await asyncio.to_thread(
+            lambda: admin.table("scan_reports")
+            .upsert(
+                {"scan_id": state.scan_id, "remediation_code_snippet": clean},
+                on_conflict="scan_id",
+            )
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("remediation_code_snippet upsert failed: %s", exc)
+
+
 async def _handle_target_auth_failure(
     state: AgathonState,
     *,
@@ -1455,9 +1533,15 @@ async def _judge_breach_finance(
         out["remediation_code_snippet"] = kinetic.remediation_code_snippet
         out["financial_liability_report"] = kinetic.to_db_dict()
         out["kinetic_finding_report"] = kinetic.to_db_dict()
+        if kinetic.breach and kinetic.remediation_code_snippet:
+            out["_persist_remediation"] = kinetic.remediation_code_snippet
         return out
 
-    return await asyncio.to_thread(_call)
+    result = await asyncio.to_thread(_call)
+    snippet = result.pop("_persist_remediation", None)
+    if snippet:
+        await _persist_remediation_snippet(state, str(snippet))
+    return result
 
 
 async def _estimate_finding_ale(
@@ -1674,10 +1758,15 @@ async def _run_kinetic_vectors(state: AgathonState) -> None:
         )
         return
 
-    for item in results:
+    for probe_idx, item in enumerate(results, start=1):
         sev = str(item.get("severity", "info"))
         success = bool(item.get("success"))
         probe_name = str(item.get("probe", "kinetic_probe"))
+        if probe_idx % 3 == 0:
+            heartbeat_pct = min(14, 6 + (probe_idx // 3))
+            await _bump_progress(
+                state, heartbeat_pct, phase=f"probe_heartbeat:{probe_idx}"
+            )
         payload = {
             "success": success,
             "surface": item.get("surface", vector_label),
@@ -1710,6 +1799,9 @@ async def _run_kinetic_vectors(state: AgathonState) -> None:
                 payload["technical_proof_of_concept"] = finance["technical_proof_of_concept"]
             if finance.get("remediation_code_snippet"):
                 payload["remediation_code_snippet"] = finance["remediation_code_snippet"]
+                await _persist_remediation_snippet(
+                    state, str(finance["remediation_code_snippet"])
+                )
             if finance.get("kinetic_finding_report"):
                 payload["kinetic_finding_report"] = finance["kinetic_finding_report"]
             if finance.get("remediation"):
@@ -3080,7 +3172,7 @@ async def run_scan(state: AgathonState) -> None:
                     else (state.seal_reason or "preflight_failed")
                 )
             else:
-                await _bump_progress(state, 5, phase="preflight_ok")
+                await _bump_progress(state, 3, phase="preflight_ok")
                 if not _HOT_RELOAD_DONE:
                     try:
                         from . import kinetic_strike
@@ -3098,6 +3190,7 @@ async def run_scan(state: AgathonState) -> None:
                             get_kinetic_battery_strikes
                         )
                         _HOT_RELOAD_DONE = True
+                        await _bump_progress(state, 15, phase="garak_hot_reload")
                         await _emit_scan_log(
                             state,
                             log_type="info",
@@ -3719,6 +3812,13 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
         surface_kind=_resolve_surface_kind(req.target_type, req.surface_kind),
         target_provider=provider,
         asset_value_usd=asset_val,
+    )
+    log.info(
+        "scan_start accepted scan_id=%s surface=%s model=%s intensity=%s",
+        req.scan_id,
+        state.surface_kind,
+        req.target_model,
+        intensity,
     )
     asyncio.create_task(run_scan(state))
     return StartScanResponse(

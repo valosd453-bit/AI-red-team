@@ -308,6 +308,17 @@ async def run_kinetic_strike(
         return kinetic.fire(attack_prompt)
 
     strike = await asyncio.to_thread(_fire)
+
+    from .pacing_lock import (
+        activate_global_pacing_lock,
+        is_groq_rate_limit_text,
+        precision_pacing_pause,
+    )
+
+    if is_groq_rate_limit_text(strike.response or ""):
+        activate_global_pacing_lock(state)
+        await precision_pacing_pause(state)
+
     asset_val = getattr(state, "asset_value_usd", 0.0) or 500_000.0
     if asset_val <= 0:
         from .financial_judge import asset_value_for_intensity

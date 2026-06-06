@@ -27,7 +27,10 @@ _HIJACKER_PROBES: tuple[tuple[str, str, str], ...] = (
 
 def _run_ai_model_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
     """Sync Garak/PyRIT probe loop — run via asyncio.to_thread from async callers."""
+    from agathon.orchestrator import sync_probe_heartbeat
+
     findings: List[Dict[str, Any]] = []
+    probe_idx = 0
     utc = build_universal_client(
         target_url=state.target_url,
         target_api_key=state.api_key,
@@ -63,6 +66,8 @@ def _run_ai_model_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
                     "evidence": (getattr(result, "response", "") or "")[:500],
                 }
             )
+            probe_idx += 1
+            sync_probe_heartbeat(state, probe_idx)
         except Exception as exc:  # noqa: BLE001
             curated = CURATED_VECTORS.get(category, [])
             if curated:
@@ -84,6 +89,8 @@ def _run_ai_model_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
                             "evidence": (response or "")[:500],
                         }
                     )
+                    probe_idx += 1
+                    sync_probe_heartbeat(state, probe_idx)
                 except Exception as inner:  # noqa: BLE001
                     logger.debug("[ai_model] hijacker %s skipped: %s", registry_name, inner)
             else:
@@ -133,6 +140,8 @@ def _run_ai_model_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
                         "evidence": (getattr(result, "response", "") or "")[:500],
                     }
                 )
+                probe_idx += 1
+                sync_probe_heartbeat(state, probe_idx)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "[ai_model] catalog probe %s skipped: %s",
@@ -174,6 +183,8 @@ def _run_ai_model_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
                     "evidence": (getattr(result, "response", "") or "")[:500],
                 }
             )
+            probe_idx += 1
+            sync_probe_heartbeat(state, probe_idx)
         except Exception as exc:  # noqa: BLE001
             logger.debug("[ai_model] garak probe %s skipped: %s", registry_name, exc)
 
@@ -199,6 +210,8 @@ def _run_ai_model_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
                     "evidence": (getattr(result, "response", "") or "")[:500],
                 }
             )
+            probe_idx += 1
+            sync_probe_heartbeat(state, probe_idx)
         except Exception as exc:  # noqa: BLE001
             logger.debug("[ai_model] pyrit %s skipped: %s", spec["name"], exc)
 
