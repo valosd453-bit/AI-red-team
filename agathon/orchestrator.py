@@ -4476,7 +4476,8 @@ async def bazaar_audit_script(script_id: str) -> JSONResponse:
         result = (
             admin.table("bazaar_scripts")
             .select(
-                "id, author_id, name, description, language, code, code_content, metadata"
+                "id, author_id, name, description, language, code, code_content, "
+                "metadata, price_usd"
             )
             .eq("id", script_id)
             .maybe_single()
@@ -4510,9 +4511,24 @@ async def bazaar_audit_script(script_id: str) -> JSONResponse:
     verdict = audit.verdict
     is_cleared = verdict == "cleared"
     is_rejected = verdict == "rejected"
+    custom_price = float(row.get("price_usd") or 0)
+    quality_score = max(0, min(10, round((100 - int(audit.risk_score)) / 10)))
+    # Sprint 24: certify high-quality probes (audit_risk_score > 8 on 0–10 quality scale)
+    is_certified = (
+        not is_rejected
+        and (int(audit.risk_score) > 8 or quality_score > 8)
+        and audit.is_functional_probe
+    )
+    is_published = is_certified and is_cleared
 
     existing_meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    merged_meta = {**existing_meta, **audit.metadata}
+    merged_meta = {
+        **existing_meta,
+        **audit.metadata,
+        "quality_score": quality_score,
+        "custom_price_usd": custom_price,
+        "forgeguard_certified": is_certified,
+    }
     if audit.remediation_advice:
         merged_meta["remediation_advice"] = audit.remediation_advice
 
@@ -4523,8 +4539,9 @@ async def bazaar_audit_script(script_id: str) -> JSONResponse:
         "audit_reason": audit.reason,
         "audited_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "status": audit.status.lower() if audit.status.isupper() else audit.status,
-        "is_certified": is_cleared,
-        "is_published": is_cleared,
+        "is_certified": is_certified,
+        "is_published": is_published,
+        "price_usd": custom_price,
         "metadata": merged_meta,
     }
 
@@ -4551,12 +4568,50 @@ async def bazaar_audit_script(script_id: str) -> JSONResponse:
             "reason": audit.reason,
             "remediation_advice": audit.remediation_advice,
             "is_functional_probe": audit.is_functional_probe,
-            "is_certified": is_cleared,
-            "is_published": is_cleared,
+            "is_certified": is_certified,
+            "is_published": is_published,
+            "quality_score": quality_score,
+            "custom_price_usd": custom_price,
             "metadata": merged_meta,
         },
         status_code=422 if is_rejected else 200,
     )
+
+
+class WarMachineScrapeRequest(BaseModel):
+    hours: int = Field(default=24, ge=1, le=168)
+    source: str = Field(default="producthunt_ai")
+
+
+@app.post("/war-machine/scrape", status_code=202)
+async def war_machine_scrape(
+    payload: WarMachineScrapeRequest,
+    background_tasks: BackgroundTasks,
+    _auth: str = Depends(_require_internal_secret),
+) -> JSONResponse:
+    """Sovereign Marine Swarm — scrape Product Hunt AI category (last N hours)."""
+    from .war_machine import scrape_product_hunt_ai
+
+    admin = _get_supabase_admin()
+
+    def _run() -> Dict[str, Any]:
+        return scrape_product_hunt_ai(hours=payload.hours, supabase_admin=admin)
+
+    if background_tasks is not None:
+        background_tasks.add_task(_run)
+        return JSONResponse(
+            {
+                "ok": True,
+                "status": "started",
+                "source": payload.source,
+                "hours": payload.hours,
+                "message": "Marine Swarm scraper dispatched — Product Hunt AI category",
+            },
+            status_code=202,
+        )
+
+    result = await asyncio.to_thread(_run)
+    return JSONResponse(result, status_code=200)
 
 
 class ForgeKillRequest(BaseModel):
