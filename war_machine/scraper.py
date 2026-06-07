@@ -1,11 +1,10 @@
 """
 War Machine — Product Hunt AI category scraper (last 24h).
-Upserts leads into Supabase for Marine Swarm outreach pipeline.
+Writes leads to Supabase war_machine_leads (falls back to public.leads).
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -14,10 +13,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-log = logging.getLogger("agathon.war_machine")
+log = logging.getLogger("war_machine.scraper")
 
 PH_GRAPHQL = "https://api.producthunt.com/v2/api/graphql"
 PH_TOPIC_SLUG = "artificial-intelligence"
+
+WAR_MACHINE_LEADS_TABLE = os.environ.get("WAR_MACHINE_LEADS_TABLE", "war_machine_leads")
+WAR_MACHINE_LEADS_WRITE_TABLE = os.environ.get("WAR_MACHINE_LEADS_WRITE_TABLE", "leads")
 
 PH_QUERY = """
 query RecentAiPosts($postedAfter: DateTime!, $first: Int!) {
@@ -44,6 +46,11 @@ query RecentAiPosts($postedAfter: DateTime!, $first: Int!) {
 """ % PH_TOPIC_SLUG
 
 
+def _write_table() -> str:
+    """Physical table for upserts — war_machine_leads is a read-only view in Supabase."""
+    return WAR_MACHINE_LEADS_WRITE_TABLE
+
+
 def _parse_iso_ts(raw: str) -> Optional[datetime]:
     if not raw:
         return None
@@ -68,7 +75,7 @@ def _fetch_via_product_hunt_api(hours: int = 24) -> List[Dict[str, Any]]:
     if not token:
         return []
 
-    import httpx  # lazy — optional dependency path
+    import httpx
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     payload = {
@@ -89,11 +96,7 @@ def _fetch_via_product_hunt_api(hours: int = 24) -> List[Dict[str, Any]]:
         resp.raise_for_status()
         data = resp.json()
 
-    edges = (
-        data.get("data", {})
-        .get("posts", {})
-        .get("edges", [])
-    )
+    edges = data.get("data", {}).get("posts", {}).get("edges", [])
     leads: List[Dict[str, Any]] = []
     for edge in edges:
         node = edge.get("node") or {}
@@ -118,7 +121,6 @@ def _fetch_via_product_hunt_api(hours: int = 24) -> List[Dict[str, Any]]:
 
 
 def _fetch_via_public_feed(hours: int = 24) -> List[Dict[str, Any]]:
-    """Best-effort RSS fallback when PH API token is unset."""
     import httpx
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -134,12 +136,18 @@ def _fetch_via_public_feed(hours: int = 24) -> List[Dict[str, Any]]:
     for block in re.findall(r"<item>([\s\S]*?)</item>", body):
         title_m = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", block)
         link_m = re.search(r"<link>(.*?)</link>", block)
-        desc_m = re.search(r"<description>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</description>", block, re.S)
+        desc_m = re.search(
+            r"<description>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</description>", block, re.S
+        )
         pub_m = re.search(r"<pubDate>(.*?)</pubDate>", block)
         if not title_m:
             continue
         title = re.sub(r"<[^>]+>", "", title_m.group(1)).strip()
-        if not re.search(r"\b(AI|LLM|GPT|agent|model|ML)\b", title + (desc_m.group(1) if desc_m else ""), re.I):
+        if not re.search(
+            r"\b(AI|LLM|GPT|agent|model|ML)\b",
+            title + (desc_m.group(1) if desc_m else ""),
+            re.I,
+        ):
             continue
         if pub_m:
             try:
@@ -173,9 +181,7 @@ def scrape_product_hunt_ai(
     hours: int = 24,
     supabase_admin: Any = None,
 ) -> Dict[str, Any]:
-    """
-    Scrape Product Hunt AI category (last N hours) and upsert into leads.
-    """
+    """Scrape Product Hunt AI category and upsert into war_machine_leads."""
     started = time.time()
     leads = _fetch_via_product_hunt_api(hours=hours)
     source_mode = "product_hunt_api"
@@ -186,6 +192,7 @@ def scrape_product_hunt_ai(
     inserted = 0
     updated = 0
     errors: List[str] = []
+    table_name = _write_table()
 
     if supabase_admin is not None:
         for lead in leads:
@@ -199,14 +206,14 @@ def scrape_product_hunt_ai(
                 continue
             try:
                 existing = (
-                    supabase_admin.table("leads")
+                    supabase_admin.table(table_name)
                     .select("id")
                     .eq("website_url", website)
                     .maybe_single()
                     .execute()
                 )
                 if existing.data:
-                    supabase_admin.table("leads").update(
+                    supabase_admin.table(table_name).update(
                         {
                             "description": lead.get("description"),
                             "founder_name": lead.get("founder_name"),
@@ -215,7 +222,7 @@ def scrape_product_hunt_ai(
                     ).eq("id", existing.data["id"]).execute()
                     updated += 1
                 else:
-                    supabase_admin.table("leads").insert(lead).execute()
+                    supabase_admin.table(table_name).insert(lead).execute()
                     inserted += 1
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{lead.get('company_name')}:{exc}")
@@ -238,6 +245,7 @@ def scrape_product_hunt_ai(
         "ok": True,
         "source_mode": source_mode,
         "hours": hours,
+        "table": table_name,
         "leads_found": len(leads),
         "inserted": inserted,
         "updated": updated,

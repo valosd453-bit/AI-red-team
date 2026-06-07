@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any, Dict, List, TYPE_CHECKING
@@ -54,8 +55,8 @@ def _build_id_url(base: str, seed: int, test_id: int) -> str:
     return re.sub(str(seed), str(test_id), base, count=1)
 
 
-async def run_api_gateway_probes(state: "AgathonState") -> List[Dict[str, Any]]:
-    """Sequential ID fuzzer — BOLA/IDOR sweep via UniversalTargetClient."""
+def _run_api_gateway_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
+    """Sync BOLA/IDOR sweep — run via asyncio.to_thread from async callers."""
     from agathon.target_client import build_universal_client
 
     findings: List[Dict[str, Any]] = []
@@ -91,7 +92,7 @@ async def run_api_gateway_probes(state: "AgathonState") -> List[Dict[str, Any]]:
     exfiltration_hits = 0
     for probe_url in candidates[:12]:
         try:
-            resp = await utc.request_async("GET", probe_url)
+            resp = utc.request("GET", probe_url)
             body_snippet = (resp.text or "")[:300]
             tested_id: str | int | None = None
             for pat in _ID_PATTERNS:
@@ -173,3 +174,8 @@ async def run_api_gateway_probes(state: "AgathonState") -> List[Dict[str, Any]]:
         )
 
     return findings
+
+
+async def run_api_gateway_probes(state: "AgathonState") -> List[Dict[str, Any]]:
+    """Sequential ID fuzzer — BOLA/IDOR sweep off the event loop thread."""
+    return await asyncio.to_thread(_run_api_gateway_probes_sync, state)

@@ -22,26 +22,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# #region agent log
-def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
-    try:
-        import os
-
-        payload = {
-            "sessionId": "c20499",
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-            "hypothesisId": hypothesis_id,
-        }
-        path = os.environ.get("FORGEGUARD_DEBUG_LOG", "debug-c20499.log")
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload) + "\n")
-    except Exception:
-        pass
-# #endregion
-
 try:
     import jsonschema  # noqa: F401
 except ImportError:
@@ -68,19 +48,6 @@ try:
     print("[SYSTEM] Garak KeyError Shield: SEALED.")
 except Exception as e:
     print(f"[SYSTEM] Garak catalogue shielded at boot: {e}", flush=True)
-
-# #region agent log
-_agent_debug_log(
-    "garak_catalog.py:boot",
-    "garak shield applied",
-    {
-        "python": sys.version.split()[0],
-        "garak_boot_ok": _GARAK_BOOT_OK,
-        "has_jsonschema": "jsonschema" in sys.modules,
-    },
-    "H1-jsonschema-garak-boot",
-)
-# #endregion
 
 # Build-time floor (Docker/nixpacks) — Garak cold-starts without full runtime env
 COLD_START_MIN_PROBES = 100
@@ -457,14 +424,6 @@ def hot_reload_garak_catalog(
 
     added, registry_size = reload_garak_heavy_registry()
     n = probe_count(log=True, env=runtime_env)
-    # #region agent log
-    _agent_debug_log(
-        "garak_catalog.py:hot_reload",
-        "hot reload complete",
-        {"probe_count": n, "python": sys.version.split()[0]},
-        "H2-probe-discovery",
-    )
-    # #endregion
     print(f"[registry] Hot reload probes detected: {n}", flush=True)
     msg = (
         f"[registry] Hot reload probes detected: {n} "

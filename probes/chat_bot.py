@@ -62,8 +62,8 @@ _TOOL_CALL_PAYLOADS: tuple[tuple[str, str], ...] = (
 )
 
 
-async def run_chat_bot_probes(state: "AgathonState") -> List[Dict[str, Any]]:
-    """Intent drift: trick Sales Bot into acting as Hacker Terminal."""
+def _run_chat_bot_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
+    """Sync chat-bot probes — run via asyncio.to_thread from async callers."""
     findings: List[Dict[str, Any]] = []
 
     utc = build_universal_client(
@@ -77,32 +77,26 @@ async def run_chat_bot_probes(state: "AgathonState") -> List[Dict[str, Any]]:
         from probes.pyrit_adapter import PYRIT_SCENARIOS, run_pyrit_probe
 
         llm = utc._llm()
-
-        def _pyrit_batch() -> List[Dict[str, Any]]:
-            batch: List[Dict[str, Any]] = []
-            for spec in PYRIT_SCENARIOS[:2]:
-                try:
-                    result = run_pyrit_probe(
-                        llm,
-                        registry_name=spec["name"],
-                        category=spec["category"],
-                    )
-                    batch.append(
-                        {
-                            "surface": "CHAT BOT",
-                            "vector": "CHAT_BOT",
-                            "probe": spec["name"],
-                            "category": spec["category"],
-                            "success": bool(getattr(result, "success", False)),
-                            "severity": getattr(result, "severity", "info"),
-                            "evidence": (getattr(result, "response", "") or "")[:500],
-                        }
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("[chat_bot] pyrit %s skipped: %s", spec["name"], exc)
-            return batch
-
-        findings.extend(await asyncio.to_thread(_pyrit_batch))
+        for spec in PYRIT_SCENARIOS[:2]:
+            try:
+                result = run_pyrit_probe(
+                    llm,
+                    registry_name=spec["name"],
+                    category=spec["category"],
+                )
+                findings.append(
+                    {
+                        "surface": "CHAT BOT",
+                        "vector": "CHAT_BOT",
+                        "probe": spec["name"],
+                        "category": spec["category"],
+                        "success": bool(getattr(result, "success", False)),
+                        "severity": getattr(result, "severity", "info"),
+                        "evidence": (getattr(result, "response", "") or "")[:500],
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[chat_bot] pyrit %s skipped: %s", spec["name"], exc)
     except ImportError:
         pass
 
@@ -179,3 +173,8 @@ async def run_chat_bot_probes(state: "AgathonState") -> List[Dict[str, Any]]:
             )
 
     return findings
+
+
+async def run_chat_bot_probes(state: "AgathonState") -> List[Dict[str, Any]]:
+    """Intent drift: trick Sales Bot into acting as Hacker Terminal."""
+    return await asyncio.to_thread(_run_chat_bot_probes_sync, state)

@@ -331,7 +331,6 @@ async def _bump_progress(
     pct: int,
     *,
     phase: str = "",
-    run_id: str = "post-fix",
 ) -> None:
     """Monotonic progress_pct — breaks the 2% stall between preflight and brain loop."""
     target = max(state.progress_pct, min(95, int(pct)))
@@ -339,26 +338,7 @@ async def _bump_progress(
         return
     state.progress_pct = target
     await _update_scan_row(state, progress_pct=target)
-    # #region agent log
-    try:
-        with open("debug-c20499.log", "a", encoding="utf-8") as _fh:
-            _fh.write(
-                json.dumps(
-                    {
-                        "sessionId": "c20499",
-                        "hypothesisId": "H2-progress-heartbeat",
-                        "location": "orchestrator.py:_bump_progress",
-                        "message": "progress bumped",
-                        "data": {"scan_id": state.scan_id, "pct": target, "phase": phase},
-                        "timestamp": int(time.time() * 1000),
-                        "runId": run_id,
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-    # #endregion
+    await _maybe_notify_progress_webhook(state, phase=phase)
     if phase:
         await _emit_scan_log(
             state,
@@ -408,28 +388,6 @@ def _get_supabase_admin():
         raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing")
     try:
         _supabase_admin_client = create_client(url, key)
-        # #region agent log
-        try:
-            with open("debug-c20499.log", "a", encoding="utf-8") as _fh:
-                _fh.write(
-                    json.dumps(
-                        {
-                            "sessionId": "c20499",
-                            "location": "orchestrator.py:_get_supabase_admin",
-                            "message": "supabase client ok",
-                            "data": {
-                                "httpx": getattr(httpx, "__version__", "?"),
-                            },
-                            "timestamp": int(time.time() * 1000),
-                            "hypothesisId": "H3-supabase-proxy-fix",
-                            "runId": "post-fix",
-                        }
-                    )
-                    + "\n"
-                )
-        except Exception:
-            pass
-        # #endregion
     except TypeError as exc:
         if "proxy" not in str(exc):
             raise
@@ -696,6 +654,7 @@ class AgathonState:
     # WebSocket fan-out -------------------------------------------------------
     subscribers: Set[WebSocket] = field(default_factory=set)
     progress_pct: int = 0
+    last_status_webhook_pct: int = 0
 
     # Brain transcript turn counter -------------------------------------------
     # Monotonically incrementing index for brain_transcripts rows.
@@ -834,12 +793,11 @@ async def _update_scan_row(
         log.error("scans update failed for %s: %s", state.scan_id, e)
 
 
-def sync_probe_heartbeat(state: AgathonState, probe_idx: int) -> None:
-    """Sync DB heartbeat every 3 probes — keeps UI alive during Garak batch."""
-    if probe_idx <= 0 or probe_idx % 3 != 0:
+def sync_probe_heartbeat(state: AgathonState, strike_idx: int) -> None:
+    """Sync DB heartbeat every 5 strikes (+5%) — keeps UI alive during Garak batch."""
+    if strike_idx <= 0 or strike_idx % 5 != 0:
         return
-    pct = min(20, 6 + (probe_idx // 3))
-    target = max(state.progress_pct, pct)
+    target = min(90, state.progress_pct + 5)
     if target <= state.progress_pct:
         return
     state.progress_pct = target
@@ -848,25 +806,9 @@ def sync_probe_heartbeat(state: AgathonState, probe_idx: int) -> None:
         admin.table("scans").update({"progress_pct": target}).eq(
             "id", state.scan_id
         ).execute()
-        # #region agent log
-        with open("debug-c20499.log", "a", encoding="utf-8") as _fh:
-            _fh.write(
-                json.dumps(
-                    {
-                        "sessionId": "c20499",
-                        "hypothesisId": "H2-progress-heartbeat",
-                        "location": "orchestrator.py:sync_probe_heartbeat",
-                        "message": "probe heartbeat persisted",
-                        "data": {"scan_id": state.scan_id, "probe_idx": probe_idx, "pct": target},
-                        "timestamp": int(time.time() * 1000),
-                        "runId": "precision-pacing",
-                    }
-                )
-                + "\n"
-            )
-        # #endregion
     except Exception as exc:  # noqa: BLE001
         log.debug("sync_probe_heartbeat failed: %s", exc)
+    _fire_status_update_webhook_sync(state, phase=f"strike:{strike_idx}")
 
 
 async def _persist_remediation_snippet(
@@ -1762,10 +1704,11 @@ async def _run_kinetic_vectors(state: AgathonState) -> None:
         sev = str(item.get("severity", "info"))
         success = bool(item.get("success"))
         probe_name = str(item.get("probe", "kinetic_probe"))
-        if probe_idx % 3 == 0:
-            heartbeat_pct = min(14, 6 + (probe_idx // 3))
+        if probe_idx % 5 == 0:
             await _bump_progress(
-                state, heartbeat_pct, phase=f"probe_heartbeat:{probe_idx}"
+                state,
+                min(90, state.progress_pct + 5),
+                phase=f"strike_batch:{probe_idx}",
             )
         payload = {
             "success": success,
@@ -1902,10 +1845,12 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
                 result=kinetic_result,
             )
             await _sovereign_probe_pause(state)
-            pct = 15 + int((idx + 1) / battery_len * 30)
-            await _bump_progress(
-                state, pct, phase=f"kinetic_battery:{strike_name}"
-            )
+            if (idx + 1) % 5 == 0:
+                await _bump_progress(
+                    state,
+                    min(90, state.progress_pct + 5),
+                    phase=f"kinetic_battery_strike:{idx + 1}",
+                )
         except ValueError as e:
             await _handle_target_auth_failure(state, detail=str(e))
             return
@@ -2397,6 +2342,7 @@ async def _target_preflight(state: AgathonState) -> bool:
             "first_bytes": (probe or "")[:120],
         },
     )
+    await _bump_progress(state, 5, phase="preflight_ok")
     return True
 
 
@@ -3138,7 +3084,7 @@ async def run_scan(state: AgathonState) -> None:
     await _update_scan_row(
         state,
         status="probing",
-        progress_pct=2,
+        progress_pct=3,
         intensity=state.intensity.value,
         started_at=time.strftime(
             "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(state.started_at)
@@ -3172,7 +3118,6 @@ async def run_scan(state: AgathonState) -> None:
                     else (state.seal_reason or "preflight_failed")
                 )
             else:
-                await _bump_progress(state, 3, phase="preflight_ok")
                 if not _HOT_RELOAD_DONE:
                     try:
                         from . import kinetic_strike
@@ -3323,6 +3268,113 @@ async def run_scan(state: AgathonState) -> None:
     # Drop after a grace period so /scan/{id}/state still works briefly.
     await asyncio.sleep(60)
     await _STATE.drop(state.scan_id)
+
+
+async def _maybe_notify_progress_webhook(
+    state: AgathonState,
+    *,
+    phase: str = "",
+) -> None:
+    """Fire status_update webhook at each new 10% progress decile."""
+    decile = (int(state.progress_pct) // 10) * 10
+    if decile < 10 or decile <= state.last_status_webhook_pct:
+        return
+    state.last_status_webhook_pct = decile
+    await _notify_status_update_webhook(state, phase=phase)
+
+
+def _fire_status_update_webhook_sync(
+    state: AgathonState,
+    *,
+    phase: str = "",
+) -> None:
+    """Sync path for probe threads — same 10% decile gate."""
+    decile = (int(state.progress_pct) // 10) * 10
+    if decile < 10 or decile <= state.last_status_webhook_pct:
+        return
+    state.last_status_webhook_pct = decile
+    secret = _resolve_webhook_secret()
+    if not secret:
+        return
+    callback = (
+        os.environ.get("AGATHON_WEBHOOK_CALLBACK_URL")
+        or "https://www.forgeguard-ai.com/api/v1/webhooks/agathon"
+    ).strip()
+    import requests as _requests
+
+    body = {
+        "kind": "status_update",
+        "scan_id": state.scan_id,
+        "payload": {
+            "status": "probing",
+            "progress_pct": str(int(state.progress_pct)),
+            "phase": phase or "kinetic_probe",
+            "attacks_run": str(int(state.attacks_run or 0)),
+            "message": f"Scan progress: {state.progress_pct}%",
+        },
+    }
+    try:
+        _requests.post(
+            callback,
+            json=body,
+            headers=_webhook_auth_headers(secret),
+            timeout=8,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.debug("status_update webhook failed: %s", exc)
+
+
+async def _notify_status_update_webhook(
+    state: AgathonState,
+    *,
+    phase: str = "",
+) -> None:
+    """POST incremental progress to ForgeGuard — kind=status_update."""
+    callback = (
+        os.environ.get("AGATHON_WEBHOOK_CALLBACK_URL")
+        or "https://www.forgeguard-ai.com/api/v1/webhooks/agathon"
+    ).strip()
+    secret = _resolve_webhook_secret()
+    if not secret:
+        return
+
+    import requests as _requests
+
+    body = {
+        "kind": "status_update",
+        "scan_id": state.scan_id,
+        "payload": {
+            "status": "probing",
+            "progress_pct": str(int(state.progress_pct or 0)),
+            "phase": phase or "kinetic_progress",
+            "attacks_run": str(int(state.attacks_run or 0)),
+            "message": f"Scan progress: {state.progress_pct}%",
+            "surface_kind": state.surface_kind or "llm",
+        },
+    }
+
+    def _post() -> tuple[int, str]:
+        resp = _requests.post(
+            callback,
+            json=body,
+            headers=_webhook_auth_headers(secret),
+            timeout=8,
+        )
+        return resp.status_code, (resp.text or "")[:200]
+
+    status_code, body_snippet = await asyncio.to_thread(_post)
+    await _emit_scan_log(
+        state,
+        log_type="info",
+        severity="info",
+        attack_name="status_update_webhook",
+        payload={
+            "message": f"Progress webhook HTTP {status_code} @ {state.progress_pct}%",
+            "phase": phase,
+            "status_code": status_code,
+            "body": body_snippet,
+        },
+    )
 
 
 async def _notify_vector_breach_webhook(
@@ -3680,28 +3732,6 @@ async def _startup_checks() -> None:
     except Exception as exc:  # noqa: BLE001
         print("[CRITICAL] Garak loading delayed — server online.", flush=True)
         log.warning("[registry] Garak startup deferred: %s", exc)
-        # #region agent log
-        try:
-            import json as _json
-            import time as _time
-
-            with open("debug-c20499.log", "a", encoding="utf-8") as _fh:
-                _fh.write(
-                    _json.dumps(
-                        {
-                            "sessionId": "c20499",
-                            "location": "orchestrator.py:_startup_checks",
-                            "message": "garak deferred",
-                            "data": {"error": str(exc)[:300]},
-                            "timestamp": int(_time.time() * 1000),
-                            "hypothesisId": "H2-startup-garak-deferred",
-                        }
-                    )
-                    + "\n"
-                )
-        except Exception:
-            pass
-        # #endregion
 
     print(
         f"[registry] Startup summary: {registry_size} registry entries, "
@@ -4578,40 +4608,38 @@ async def bazaar_audit_script(script_id: str) -> JSONResponse:
     )
 
 
-class WarMachineScrapeRequest(BaseModel):
-    hours: int = Field(default=24, ge=1, le=168)
-    source: str = Field(default="producthunt_ai")
-
-
-@app.post("/war-machine/scrape", status_code=202)
-async def war_machine_scrape(
-    payload: WarMachineScrapeRequest,
-    background_tasks: BackgroundTasks,
+@app.get("/war-machine/leads")
+async def war_machine_leads_read(
+    limit: int = 50,
+    status: Optional[str] = None,
     _auth: str = Depends(_require_internal_secret),
 ) -> JSONResponse:
-    """Sovereign Marine Swarm — scrape Product Hunt AI category (last N hours)."""
-    from .war_machine import scrape_product_hunt_ai
-
+    """Read-only view of Marine Swarm leads — Agathon does not scrape here."""
     admin = _get_supabase_admin()
+    table = os.environ.get("WAR_MACHINE_LEADS_TABLE", "war_machine_leads")
+    fallback = os.environ.get("WAR_MACHINE_LEADS_FALLBACK", "leads")
 
-    def _run() -> Dict[str, Any]:
-        return scrape_product_hunt_ai(hours=payload.hours, supabase_admin=admin)
+    def _load() -> Dict[str, Any]:
+        q = admin.table(table).select("*").order("created_at", desc=True).limit(limit)
+        if status:
+            q = q.eq("status", status)
+        try:
+            rows = q.execute().data or []
+            return {"ok": True, "table": table, "leads": rows, "count": len(rows)}
+        except Exception:
+            q2 = (
+                admin.table(fallback)
+                .select("*")
+                .order("created_at", desc=True)
+                .limit(limit)
+            )
+            if status:
+                q2 = q2.eq("status", status)
+            rows = q2.execute().data or []
+            return {"ok": True, "table": fallback, "leads": rows, "count": len(rows)}
 
-    if background_tasks is not None:
-        background_tasks.add_task(_run)
-        return JSONResponse(
-            {
-                "ok": True,
-                "status": "started",
-                "source": payload.source,
-                "hours": payload.hours,
-                "message": "Marine Swarm scraper dispatched — Product Hunt AI category",
-            },
-            status_code=202,
-        )
-
-    result = await asyncio.to_thread(_run)
-    return JSONResponse(result, status_code=200)
+    result = await asyncio.to_thread(_load)
+    return JSONResponse(result)
 
 
 class ForgeKillRequest(BaseModel):

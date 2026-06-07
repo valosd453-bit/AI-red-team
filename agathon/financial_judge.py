@@ -49,6 +49,7 @@ _NUMERIC_DB_KEYS = frozenset(
         "gdpr_fine_usd",
         "operational_cost_usd",
         "total_liability_usd",
+        "records_leaked_estimate",
     }
 )
 
@@ -106,6 +107,10 @@ class FinancialLiabilityReport:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def to_db_dict(self) -> Dict[str, Any]:
+        """NUMERIC-safe payload — financial fields as strings for Postgres."""
+        return format_financial_dict_for_db(asdict(self))
 
 
 def estimate_records_leaked(text: str, category: str = "") -> int:
@@ -173,7 +178,10 @@ def merge_kinetic_report(
     asset_liab = _asset_liability(asset_value_usd, severity, breach)
     operational = max(0.0, float(llm_operational_usd or 0))
     llm_total = max(0.0, float(llm_liability or 0))
-    total = max(llm_total, gdpr_fine + operational + asset_liab)
+    record_liability = gdpr_fine
+    total = max(llm_total, record_liability + operational + asset_liab)
+    if breach and records > 0:
+        total = max(total, record_liability)
     if identity_exposed:
         total = max(total, IDENTITY_EXPOSURE_LIABILITY_USD)
     if breach and total <= 0:

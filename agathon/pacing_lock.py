@@ -5,9 +5,7 @@ Global Precision Pacing — shared Groq 429 backoff across orchestrator + kineti
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import time
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
@@ -41,30 +39,6 @@ def activate_global_pacing_lock(state: Optional["AgathonState"] = None) -> None:
     if state is not None:
         state.sovereign_probe_delay_s = PRECISION_PACING_DELAY_S
         state.pacing_lock_remaining = PRECISION_PACING_ATTEMPTS
-    # #region agent log
-    try:
-        with open("debug-c20499.log", "a", encoding="utf-8") as _fh:
-            _fh.write(
-                json.dumps(
-                    {
-                        "sessionId": "c20499",
-                        "hypothesisId": "H1-pacing-lock",
-                        "location": "pacing_lock.py:activate_global_pacing_lock",
-                        "message": "precision pacing activated",
-                        "data": {
-                            "delay_s": PRECISION_PACING_DELAY_S,
-                            "attempts": PRECISION_PACING_ATTEMPTS,
-                            "scan_id": getattr(state, "scan_id", None),
-                        },
-                        "timestamp": int(time.time() * 1000),
-                        "runId": "precision-pacing",
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-    # #endregion
 
 
 def effective_pacing_delay_s(state: Optional["AgathonState"] = None) -> float:

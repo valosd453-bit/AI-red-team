@@ -6,8 +6,8 @@ from agathon.orchestrator import app
 print("[SOVEREIGN] Agathon Engine Active. All pathways isolated.", flush=True)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 7860))
-    print(f"--- AGATHON BATTLE ENGINE BOOTING ON SOVEREIGN PORT {port} ---")
+    port = int(os.environ.get("PORT", "7860"))
+    print(f"--- AGATHON BATTLE ENGINE BOOTING ON 0.0.0.0:{port} ---", flush=True)
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
