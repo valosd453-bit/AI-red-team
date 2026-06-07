@@ -26,29 +26,65 @@ AUTH_FAILURE_MESSAGE = (
 )
 KEY_PROVIDER_MISMATCH = "KEY_PROVIDER_MISMATCH"
 
+TARGET_REJECTION_MESSAGE = (
+    "ATTACK REJECTED BY TARGET - Verify model ID and API Permissions."
+)
+
 STRICT_PAYLOAD_KEYS = frozenset({"model", "messages", "temperature", "max_tokens"})
 
 SOVEREIGN_STRIKE_BACKOFF_S = 5.0
+_MAX_404_MODEL_ATTEMPTS = 2
 
 _GROQ_FALLBACK_MODELS: tuple[str, ...] = (
-    "llama-3.3-70b-versatile",
     "llama-3.1-70b-versatile",
     "llama-3.1-8b-instant",
 )
 
 
+def _debug_log_path() -> str:
+    custom = (os.environ.get("FORGEGUARD_DEBUG_LOG") or "").strip()
+    if custom:
+        return custom
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.normpath(os.path.join(here, "..", "..", "debug-c20499.log"))
+
+
+def _agent_debug_log(
+    location: str,
+    message: str,
+    data: Dict[str, Any],
+    hypothesis_id: str,
+) -> None:
+    # #region agent log
+    try:
+        payload = {
+            "sessionId": "c20499",
+            "location": location,
+            "message": message,
+            "data": data,
+            "hypothesisId": hypothesis_id,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open(_debug_log_path(), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, default=str) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+    # #endregion
+
+
 def _strike_model_candidates(
     model: str, target_url: str, target_provider: str
 ) -> list[str]:
-    """Primary model first; Groq 404s retry known-live fallbacks."""
+    """Primary model first; at most one Groq fallback (404 cap enforced in client)."""
     primary = (model or "gpt-4o-mini").strip()
     if resolve_target_provider(target_url, target_provider) != "groq":
         return [primary]
-    out: list[str] = []
-    for candidate in (primary, *_GROQ_FALLBACK_MODELS):
+    out: list[str] = [primary]
+    for candidate in _GROQ_FALLBACK_MODELS:
         if candidate and candidate not in out:
             out.append(candidate)
-    return out or [primary]
+            break
+    return out[:_MAX_404_MODEL_ATTEMPTS]
 
 _ENGINE_KEY_ENVS = (
     "GROQ_API_KEY",
@@ -96,6 +132,11 @@ def normalize_openai_base_url(base_url: str) -> str:
     base = (base_url or "").strip().rstrip("/")
     if not base.startswith("http"):
         base = f"https://{base}"
+    lower = base.lower()
+    for suffix in ("/chat/completions", "/completions"):
+        if lower.endswith(suffix):
+            base = base[: -len(suffix)].rstrip("/")
+            lower = base.lower()
     if not (base.endswith("/v1") or "/v1/" in base):
         base = base + "/v1"
     return base
@@ -116,12 +157,36 @@ def build_strict_chat_payload(
         stripped = [k for k in extra if k not in STRICT_PAYLOAD_KEYS]
         if stripped:
             log.debug("[strike] stripped non-strict payload keys: %s", stripped)
+            _agent_debug_log(
+                "strike_dispatcher.py:build_strict_chat_payload",
+                "stripped extra payload keys",
+                {"stripped": stripped},
+                "A",
+            )
     return {
-        "model": model,
+        "model": (model or "gpt-4o-mini").strip(),
         "messages": messages,
         "temperature": float(temperature),
         "max_tokens": int(max_tokens),
     }
+
+
+def build_chat_completions_payload(
+    *,
+    model: str,
+    messages: list,
+    temperature: float = 0.4,
+    max_tokens: int = 512,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Strict 4-field OpenAI chat body — strips provider/session_id and all extras."""
+    return build_strict_chat_payload(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        extra=extra,
+    )
 
 
 def _engine_env_keys() -> set[str]:
@@ -145,6 +210,13 @@ def is_auth_failure_response(response: str, http_status: int = 0) -> bool:
         return True
     text = (response or "").lower()
     return "[http-401]" in text or "invalid api key" in text or "incorrect api key" in text
+
+
+def is_target_not_found_response(response: str, http_status: int = 0) -> bool:
+    if http_status == 404:
+        return True
+    text = (response or "").lower()
+    return text.startswith("[http-404]") or "[http-404]" in text
 
 
 def _mask_key(api_key: str) -> str:
@@ -192,13 +264,25 @@ class WeaponLLMClient:
         model_candidates = _strike_model_candidates(
             self.model, self.base_url, self.target_provider
         )
+        _agent_debug_log(
+            "strike_dispatcher.py:generate_response",
+            "strike dispatch prepared",
+            {
+                "url": url,
+                "base_url": self.base_url,
+                "model_candidates": model_candidates,
+                "payload_keys": list(STRICT_PAYLOAD_KEYS),
+            },
+            "B",
+        )
 
         max_attempts = 5
         base_delay = 2.0
         cap_delay = 60.0
+        not_found_attempts = 0
 
         for model_name in model_candidates:
-            body = build_strict_chat_payload(
+            body = build_chat_completions_payload(
                 model=model_name,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=temperature if temperature is not None else 0.4,
@@ -226,12 +310,36 @@ class WeaponLLMClient:
                     time.sleep(delay)
                     continue
 
-                if r.status_code == 404 and model_name != model_candidates[-1]:
-                    log.warning(
-                        "[strike] HTTP 404 model=%s — trying fallback",
-                        model_name,
+                if r.status_code == 404:
+                    not_found_attempts += 1
+                    _agent_debug_log(
+                        "strike_dispatcher.py:generate_response",
+                        "HTTP 404 from target",
+                        {
+                            "model": model_name,
+                            "attempt": not_found_attempts,
+                            "url": url,
+                            "raw": r.text[:500],
+                        },
+                        "C",
                     )
-                    break
+                    if not_found_attempts >= _MAX_404_MODEL_ATTEMPTS:
+                        try:
+                            err = r.json()
+                        except Exception:  # noqa: BLE001
+                            err = {"text": r.text[:800]}
+                        return f"[http-404] {json.dumps(err)[:800]}"
+                    if model_name != model_candidates[-1]:
+                        log.warning(
+                            "[strike] HTTP 404 model=%s — one fallback remaining",
+                            model_name,
+                        )
+                        break
+                    try:
+                        err = r.json()
+                    except Exception:  # noqa: BLE001
+                        err = {"text": r.text[:800]}
+                    return f"[http-404] {json.dumps(err)[:800]}"
 
                 if r.status_code >= 400:
                     try:

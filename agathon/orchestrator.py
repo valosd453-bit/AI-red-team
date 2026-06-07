@@ -135,9 +135,11 @@ from .supabase_sync import (  # noqa: E402
 from .strike_dispatcher import (  # noqa: E402
     AUTH_FAILURE_MESSAGE,
     KEY_PROVIDER_MISMATCH,
+    TARGET_REJECTION_MESSAGE,
     build_proof_of_work_poc,
     build_weapon_client,
     is_auth_failure_response,
+    is_target_not_found_response,
     resolve_target_provider,
     provider_from_url,
 )
@@ -647,6 +649,7 @@ class AgathonState:
     cancelled: bool = False
     sealed: bool = False
     seal_reason: str = ""
+    target_rejected: bool = False
 
     # Recent findings cache for the digest endpoint ---------------------------
     # Keep last 50 — anything older is fetched on demand from scan_logs.
@@ -881,6 +884,115 @@ async def _handle_target_auth_failure(
         failure_reason=reason,
         completed_at=time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
     )
+
+
+async def _force_seal_target_rejection_report(
+    state: AgathonState,
+    *,
+    raw_diagnostic: str,
+) -> None:
+    """Judge (DeepSeek-R1) report even when target rejects all strikes."""
+    summary = TARGET_REJECTION_MESSAGE
+    if _HAS_JUDGE and _JUDGE_ROUTER is not None and state.ale_judge_calls < _MAX_ALE_JUDGE_CALLS:
+        state.ale_judge_calls += 1
+        prompt = (
+            f"Target rejected strike HTTP requests with 404.\n"
+            f"Model: {state.target_model}\nURL: {state.target_url}\n"
+            f"Raw diagnostic:\n{raw_diagnostic[:1200]}\n"
+            "Produce an executive summary that clearly states: "
+            "'ATTACK REJECTED BY TARGET - Verify model ID and API Permissions.'"
+        )
+        try:
+            verdict = await asyncio.to_thread(
+                lambda: sanitize_text_for_transport(_JUDGE_ROUTER.judge(prompt, "audit"))
+            )
+            if verdict and len(verdict.strip()) > 20:
+                summary = verdict.strip()[:4000]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("target rejection judge failed: %s", exc)
+
+    finding = {
+        "attack": "target_rejection",
+        "severity": "high",
+        "payload": {
+            "success": False,
+            "message": TARGET_REJECTION_MESSAGE,
+            "summary": summary,
+            "executive_summary": summary,
+            "raw_diagnostic": raw_diagnostic[:2000],
+        },
+    }
+    state.findings.append(finding)
+    state.seal_reason = summary
+    await _emit_scan_log(
+        state,
+        log_type="breach",
+        severity="high",
+        attack_name="target_rejection",
+        payload=finding["payload"],
+    )
+
+
+async def _handle_target_rejection(
+    state: AgathonState,
+    *,
+    detail: str = "",
+) -> None:
+    """404 / model-not-found — seal immediately, persist diagnostics, force report."""
+    if state.target_rejected:
+        return
+    raw = (detail or "")[:8000]
+    state.target_rejected = True
+    state.sealed = True
+    await _force_seal_target_rejection_report(state, raw_diagnostic=raw)
+    await _emit_scan_log(
+        state,
+        log_type="info",
+        severity="high",
+        attack_name="target_rejection",
+        payload={
+            "message": TARGET_REJECTION_MESSAGE,
+            "detail": raw[:800],
+            "target_model": state.target_model,
+            "target_url": state.target_url,
+        },
+    )
+    await _update_scan_row(
+        state,
+        status="sealed",
+        progress_pct=100,
+        failure_reason=TARGET_REJECTION_MESSAGE,
+        target_diagnostic_logs=raw,
+        completed_at=time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+    )
+    # #region agent log
+    try:
+        import json as _json
+
+        path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "debug-c20499.log")
+        )
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(
+                _json.dumps(
+                    {
+                        "sessionId": "c20499",
+                        "location": "orchestrator.py:_handle_target_rejection",
+                        "message": "target rejection sealed",
+                        "data": {
+                            "scan_id": state.scan_id,
+                            "model": state.target_model,
+                            "raw_prefix": raw[:200],
+                        },
+                        "hypothesisId": "D",
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    # #endregion
 
 
 async def _emit_brain_transcript(
@@ -1829,7 +1941,16 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
                     detail=str(kinetic_result.payload.get("response_excerpt", "")),
                 )
                 return
+            if (kinetic_result.payload or {}).get("target_rejection"):
+                await _handle_target_rejection(
+                    state,
+                    detail=str(kinetic_result.payload.get("response_excerpt", "")),
+                )
+                return
             excerpt = str((kinetic_result.payload or {}).get("response_excerpt", ""))
+            if is_target_not_found_response(excerpt):
+                await _handle_target_rejection(state, detail=excerpt)
+                return
             if _is_rate_limited_response(excerpt):
                 await _record_rate_limit_event(
                     state, detail=excerpt[:400], source="kinetic_battery"
@@ -1918,7 +2039,24 @@ async def _tool_run_attack(
                 "error": AUTH_FAILURE_MESSAGE,
                 "auth_failure": True,
             }
+        if (kinetic_result.payload or {}).get("target_rejection"):
+            await _handle_target_rejection(
+                state,
+                detail=str(kinetic_result.payload.get("response_excerpt", "")),
+            )
+            return {
+                "ok": False,
+                "error": TARGET_REJECTION_MESSAGE,
+                "target_rejection": True,
+            }
         excerpt = str((kinetic_result.payload or {}).get("response_excerpt", ""))
+        if is_target_not_found_response(excerpt):
+            await _handle_target_rejection(state, detail=excerpt)
+            return {
+                "ok": False,
+                "error": TARGET_REJECTION_MESSAGE,
+                "target_rejection": True,
+            }
         if _is_rate_limited_response(excerpt):
             await _record_rate_limit_event(
                 state, detail=excerpt[:400], source="run_attack"
@@ -2301,6 +2439,9 @@ async def _target_preflight(state: AgathonState) -> bool:
         return False
     if is_auth_failure_response(probe):
         await _handle_target_auth_failure(state, detail=probe[:800])
+        return False
+    if is_target_not_found_response(probe):
+        await _handle_target_rejection(state, detail=probe[:8000])
         return False
     if probe.startswith("[transport-error]") or probe.startswith("[http-"):
         detail = probe[:800]
@@ -3099,6 +3240,8 @@ async def run_scan(state: AgathonState) -> None:
 
     final_status = "sealed"
     failure_reason: Optional[str] = None
+    if state.target_rejected:
+        failure_reason = TARGET_REJECTION_MESSAGE
     is_llm_surface = (state.surface_kind or "llm").strip().lower() == "llm"
     try:
         if is_llm_surface:
@@ -3149,7 +3292,10 @@ async def run_scan(state: AgathonState) -> None:
                         )
                 await _run_kinetic_vectors(state)
                 await _run_kinetic_battery(state)
-                await _brain_loop(state)
+                if state.target_rejected or state.sealed:
+                    pass
+                else:
+                    await _brain_loop(state)
         else:
             await _run_kinetic_vectors(state)
             state.sealed = True

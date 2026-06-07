@@ -14,9 +14,11 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from .strike_dispatcher import (
     AUTH_FAILURE_MESSAGE,
     KEY_PROVIDER_MISMATCH,
+    TARGET_REJECTION_MESSAGE,
     WeaponLLMClient,
     build_weapon_client,
     is_auth_failure_response,
+    is_target_not_found_response,
     strike_authorization_header,
 )
 from .supabase_sync import sanitize_text_for_transport
@@ -350,6 +352,24 @@ async def run_kinetic_strike(
                 "response_excerpt": (strike.response or "")[:500],
             },
             summary=AUTH_FAILURE_MESSAGE,
+            rationale=rationale,
+        )
+
+    if is_target_not_found_response(strike.response):
+        return KineticStrikeResult(
+            strike_name=strike_name,
+            category=category,
+            success=False,
+            severity="high",
+            payload={
+                "success": False,
+                "target_rejection": True,
+                "message": TARGET_REJECTION_MESSAGE,
+                "strike_name": strike_name,
+                "kinetic_telemetry": strike.telemetry,
+                "response_excerpt": (strike.response or "")[:800],
+            },
+            summary=TARGET_REJECTION_MESSAGE,
             rationale=rationale,
         )
 
