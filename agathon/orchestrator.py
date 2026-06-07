@@ -129,6 +129,7 @@ from .supabase_sync import (  # noqa: E402
     SupabaseSync,
     normalize_log_type,
     prepare_outbound_payload,
+    sanitize_scan_row_update,
     sanitize_text_for_transport,
 )
 from .strike_dispatcher import (  # noqa: E402
@@ -777,10 +778,7 @@ async def _update_scan_row(
     state: AgathonState, **fields: Any,
 ) -> None:
     """Patch the `scans` row (status, progress_pct, totals)."""
-    sanitized = {
-        k: sanitize_text_for_transport(v) if isinstance(v, str) else v
-        for k, v in fields.items()
-    }
+    sanitized = sanitize_scan_row_update(fields)
     try:
         admin = _get_supabase_admin()
         await asyncio.to_thread(
@@ -803,9 +801,8 @@ def sync_probe_heartbeat(state: AgathonState, strike_idx: int) -> None:
     state.progress_pct = target
     try:
         admin = _get_supabase_admin()
-        admin.table("scans").update({"progress_pct": target}).eq(
-            "id", state.scan_id
-        ).execute()
+        patch = sanitize_scan_row_update({"progress_pct": target})
+        admin.table("scans").update(patch).eq("id", state.scan_id).execute()
     except Exception as exc:  # noqa: BLE001
         log.debug("sync_probe_heartbeat failed: %s", exc)
     _fire_status_update_webhook_sync(state, phase=f"strike:{strike_idx}")

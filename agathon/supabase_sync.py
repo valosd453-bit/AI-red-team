@@ -168,6 +168,30 @@ def prepare_outbound_payload(value: Any) -> Any:
     return sanitize_payload_strings(stringify_payload_numerics(value))
 
 
+def sanitize_scan_row_update(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Coerce scans-table patch fields before Postgres UPDATE.
+
+    Forces progress_pct / ale_usd (and related USD keys) through
+    coerce_transport_scalar to prevent 22P02 invalid input syntax errors.
+    """
+    out: Dict[str, Any] = {}
+    for key, value in fields.items():
+        if key in _SCALAR_TRANSPORT_KEYS:
+            coerced = coerce_transport_scalar(key, value)
+            if coerced is None:
+                continue
+            if key == "progress_pct":
+                out[key] = int(coerced)
+            else:
+                out[key] = float(coerced)
+        elif isinstance(value, str):
+            out[key] = sanitize_text_for_transport(value)
+        else:
+            out[key] = value
+    return out
+
+
 def normalize_log_type(raw: str) -> str:
     """Map legacy orchestrator types to production scan_logs CHECK vocabulary."""
     key = (raw or "info").strip().lower()
