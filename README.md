@@ -2,7 +2,7 @@
 
 An AI red-teaming framework and FastAPI orchestrator for adversarial testing and security assessment of large language models. Powers ForgeGuard scan execution (kinetic strikes, Garak probes, Groq Brain).
 
-**Deploy target:** [Railway](https://railway.app) via **Railpack** (`runtime.txt`, `mise.toml`, `railway.toml`). Legacy `nixpacks.toml` is kept for reference if you switch builders in the dashboard.
+**Deploy targets:** [GitHub](https://github.com/valosd453-bit/AI-red-team) + [Railway](https://railway.app) only (Railpack). No Hugging Face Spaces.
 
 | Item | Value |
 |------|--------|
