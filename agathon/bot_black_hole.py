@@ -21,6 +21,36 @@ log = logging.getLogger("agathon.black_hole")
 BLACK_HOLE_UA_MARKERS = ("python-requests", "scrapy", "puppeteer")
 BLACK_HOLE_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB
 STREAM_CHUNK_BYTES = 256 * 1024  # 256 KiB per chunk
+PROBE_EXEMPT_PATHS = frozenset({"/health", "/healthz"})
+
+
+def _internal_scan_token() -> str:
+    return (
+        os.environ.get("INTERNAL_SCAN_TOKEN")
+        or os.environ.get("AGATHON_INTERNAL_SECRET")
+        or ""
+    ).strip()
+
+
+def is_probe_exempt(request: Request) -> bool:
+    """Skip Black-Hole for liveness probes and ForgeGuard/Vercel health checks."""
+    if request.url.path in PROBE_EXEMPT_PATHS:
+        return True
+
+    if (request.headers.get("x-internal-scan-token") or "").strip():
+        return True
+
+    expected = _internal_scan_token()
+    auth = (request.headers.get("authorization") or "").strip()
+    if expected and auth.lower().startswith("bearer "):
+        if auth[7:].strip() == expected:
+            return True
+
+    ua = (request.headers.get("user-agent") or "").lower()
+    if "forgeguard" in ua:
+        return True
+
+    return False
 
 
 def is_blackhole_bot(user_agent: Optional[str]) -> bool:
@@ -96,11 +126,14 @@ class BotBlackHoleMiddleware(BaseHTTPMiddleware):
     """Return a 10 GiB zero stream instead of 4xx/5xx for known scraper UAs."""
 
     async def dispatch(self, request: Request, call_next):
+        if is_probe_exempt(request):
+            return await call_next(request)
+
         ua = request.headers.get("user-agent") or ""
         if not is_blackhole_bot(ua):
             return await call_next(request)
 
-        log.warning(
+        log.info(
             "[black_hole] Engaging Black-Hole defense ua=%s path=%s ip=%s",
             ua[:120],
             request.url.path,

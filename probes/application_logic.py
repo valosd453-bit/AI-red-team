@@ -66,9 +66,13 @@ _BREACH_MARKERS = (
 )
 
 
-def _is_logic_breach(response: str) -> bool:
+def is_logic_breach(response: str) -> bool:
     lower = (response or "").lower()
     return any(m in lower for m in _BREACH_MARKERS)
+
+
+def _is_logic_breach(response: str) -> bool:
+    return is_logic_breach(response)
 
 
 async def run_application_logic_probes(state: "AgathonState") -> List[Dict[str, Any]]:

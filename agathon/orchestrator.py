@@ -3918,6 +3918,31 @@ def _health_payload() -> Dict[str, Any]:
         return dict(_SURVIVAL_HEALTH)
 
 
+@app.get("/")
+async def engine_root() -> Dict[str, Any]:
+    """API root — avoids 404 noise from scanners hitting engine.forgeguard-ai.com/."""
+    return {
+        "service": "ForgeGuard Agathon Engine",
+        "status": "online",
+        "health": "/health",
+        "docs": "https://www.forgeguard-ai.com",
+    }
+
+
+@app.get("/favicon.ico")
+async def engine_favicon():
+    from starlette.responses import Response
+
+    return Response(status_code=204)
+
+
+@app.get("/robots.txt")
+async def engine_robots():
+    from starlette.responses import PlainTextResponse
+
+    return PlainTextResponse("User-agent: *\nDisallow: /\n")
+
+
 @app.get("/healthz")
 async def healthz() -> Dict[str, Any]:
     return _health_payload()
