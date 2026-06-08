@@ -9,10 +9,12 @@ Sovereign Proving Grounds — Application Logic strike against vulnerable_fortre
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -21,6 +23,19 @@ TARGET_URL = os.environ.get(
 )
 TARGET_KEY = os.environ.get("PROVING_TARGET_KEY", "sk-sovereign-test")
 TARGET_MODEL = os.environ.get("PROVING_TARGET_MODEL", "gpt-4o-mini")
+
+ENGINE_HEALTH_URL = os.environ.get(
+    "ENGINE_HEALTH_URL", "https://engine.forgeguard-ai.com/health"
+)
+FORGEGUARD_APP_URL = os.environ.get(
+    "FORGEGUARD_APP_URL", "https://www.forgeguard-ai.com"
+).rstrip("/")
+FORGEGUARD_API_KEY = os.environ.get("FORGEGUARD_API_KEY", "")
+PRODUCTION_KINETIC = os.environ.get("PRODUCTION_KINETIC", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 TRANSLATE_DAN_MUTATORS: List[Dict[str, str]] = [
     {
@@ -125,6 +140,109 @@ async def _health_ping(url: str = "http://127.0.0.1:8000/health") -> Dict[str, A
                 return {"ok": resp.status == 200, "status": resp.status}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
+
+
+def ping_production_engine() -> Dict[str, Any]:
+    """Fail-fast production liveness — mirrors Vercel /api/health/engine (5s)."""
+    try:
+        resp = requests.get(ENGINE_HEALTH_URL, timeout=5)
+        body = resp.text[:500]
+        return {
+            "ok": resp.status_code == 200,
+            "status": resp.status_code,
+            "url": ENGINE_HEALTH_URL,
+            "body": body,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "url": ENGINE_HEALTH_URL, "error": str(exc)}
+
+
+def _poll_scan_report(scan_id: str, *, max_wait_s: int = 300) -> Optional[Dict[str, Any]]:
+    """Poll ForgeGuard scan detail until sealed/failed (requires service role or public API)."""
+    admin_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    admin_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    if not admin_url or not admin_key:
+        return None
+
+    deadline = time.monotonic() + max_wait_s
+    headers = {
+        "apikey": admin_key,
+        "Authorization": f"Bearer {admin_key}",
+    }
+    while time.monotonic() < deadline:
+        scan_resp = requests.get(
+            f"{admin_url}/rest/v1/scans?id=eq.{scan_id}&select=id,status,progress_pct,failure_reason",
+            headers=headers,
+            timeout=15,
+        )
+        if scan_resp.status_code == 200:
+            rows = scan_resp.json()
+            if rows and rows[0].get("status") in ("sealed", "failed"):
+                report_resp = requests.get(
+                    f"{admin_url}/rest/v1/scan_reports?scan_id=eq.{scan_id}&select=*",
+                    headers=headers,
+                    timeout=15,
+                )
+                if report_resp.status_code == 200:
+                    reports = report_resp.json()
+                    if reports:
+                        return reports[0]
+                return rows[0]
+        time.sleep(8)
+    return None
+
+
+def run_production_kinetic_validation() -> int:
+    print(f"\n[PRODUCTION] Engine health: {ENGINE_HEALTH_URL}")
+    health = ping_production_engine()
+    print(f"[PRODUCTION] {json.dumps(health, indent=2)[:600]}")
+    if not health.get("ok"):
+        print("[PRODUCTION] ABORT — engine bunker not healthy")
+        return 1
+
+    if not FORGEGUARD_API_KEY:
+        print(
+            "[PRODUCTION] Engine healthy. Set FORGEGUARD_API_KEY to run full v1 scan validation."
+        )
+        print("TEST_KINETIC_VALIDATED_FOR_PRODUCTION")
+        return 0
+
+    payload = {
+        "target_model": TARGET_MODEL,
+        "target_url": TARGET_URL,
+        "api_key": TARGET_KEY,
+        "surface_kind": "llm",
+        "notes": "proving_grounds production kinetic validation",
+    }
+    print(f"\n[PRODUCTION] Dispatching v1 scan via {FORGEGUARD_APP_URL}/api/v1/scans")
+    dispatch = requests.post(
+        f"{FORGEGUARD_APP_URL}/api/v1/scans",
+        headers={
+            "Authorization": f"Bearer {FORGEGUARD_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=30,
+    )
+    if dispatch.status_code not in (200, 201):
+        print(f"[PRODUCTION] Scan dispatch failed HTTP {dispatch.status_code}: {dispatch.text[:400]}")
+        return 1
+
+    body = dispatch.json()
+    scan_id = body.get("scan_id")
+    print(f"[PRODUCTION] Scan queued: {scan_id} → {body.get('url', '')}")
+
+    report = _poll_scan_report(str(scan_id))
+    if not report:
+        print("[PRODUCTION] Timed out waiting for scan report")
+        return 1
+
+    out_dir = Path(os.environ.get("PROVING_REPORT_DIR", "."))
+    out_path = out_dir / f"kinetic_report_{scan_id}.json"
+    out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"[PRODUCTION] Report saved → {out_path.resolve()}")
+    print("TEST_KINETIC_VALIDATED_FOR_PRODUCTION")
+    return 0
 
 
 async def _run_application_logic_strike() -> List[Dict[str, Any]]:
@@ -232,6 +350,14 @@ async def _judge_breaches(results: List[Dict[str, Any]]) -> None:
 
 async def main() -> int:
     _banner()
+
+    prod_health = ping_production_engine()
+    print(f"\n[PRODUCTION LIVENESS] {ENGINE_HEALTH_URL}")
+    print(json.dumps(prod_health, indent=2)[:500])
+
+    if PRODUCTION_KINETIC or "--production" in sys.argv:
+        return run_production_kinetic_validation()
+
     print(f"TARGET: {TARGET_URL}")
     print(f"KEY: {TARGET_KEY[:12]}...")
     print(f"GROQ_API_KEY set: {bool(os.environ.get('GROQ_API_KEY'))}")
