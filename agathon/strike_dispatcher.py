@@ -9,7 +9,6 @@ No ``assert_provider_handshake`` and no API-key prefix validation (``gsk_`` / ``
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import random
@@ -39,37 +38,6 @@ _GROQ_FALLBACK_MODELS: tuple[str, ...] = (
     "llama-3.1-70b-versatile",
     "llama-3.1-8b-instant",
 )
-
-
-def _debug_log_path() -> str:
-    custom = (os.environ.get("FORGEGUARD_DEBUG_LOG") or "").strip()
-    if custom:
-        return custom
-    here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.normpath(os.path.join(here, "..", "..", "debug-c20499.log"))
-
-
-def _agent_debug_log(
-    location: str,
-    message: str,
-    data: Dict[str, Any],
-    hypothesis_id: str,
-) -> None:
-    # #region agent log
-    try:
-        payload = {
-            "sessionId": "c20499",
-            "location": location,
-            "message": message,
-            "data": data,
-            "hypothesisId": hypothesis_id,
-            "timestamp": int(time.time() * 1000),
-        }
-        with open(_debug_log_path(), "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, default=str) + "\n")
-    except Exception:  # noqa: BLE001
-        pass
-    # #endregion
 
 
 def _strike_model_candidates(
@@ -157,12 +125,6 @@ def build_strict_chat_payload(
         stripped = [k for k in extra if k not in STRICT_PAYLOAD_KEYS]
         if stripped:
             log.debug("[strike] stripped non-strict payload keys: %s", stripped)
-            _agent_debug_log(
-                "strike_dispatcher.py:build_strict_chat_payload",
-                "stripped extra payload keys",
-                {"stripped": stripped},
-                "A",
-            )
     return {
         "model": (model or "gpt-4o-mini").strip(),
         "messages": messages,
@@ -264,17 +226,6 @@ class WeaponLLMClient:
         model_candidates = _strike_model_candidates(
             self.model, self.base_url, self.target_provider
         )
-        _agent_debug_log(
-            "strike_dispatcher.py:generate_response",
-            "strike dispatch prepared",
-            {
-                "url": url,
-                "base_url": self.base_url,
-                "model_candidates": model_candidates,
-                "payload_keys": list(STRICT_PAYLOAD_KEYS),
-            },
-            "B",
-        )
 
         max_attempts = 5
         base_delay = 2.0
@@ -312,17 +263,6 @@ class WeaponLLMClient:
 
                 if r.status_code == 404:
                     not_found_attempts += 1
-                    _agent_debug_log(
-                        "strike_dispatcher.py:generate_response",
-                        "HTTP 404 from target",
-                        {
-                            "model": model_name,
-                            "attempt": not_found_attempts,
-                            "url": url,
-                            "raw": r.text[:500],
-                        },
-                        "C",
-                    )
                     if not_found_attempts >= _MAX_404_MODEL_ATTEMPTS:
                         try:
                             err = r.json()
@@ -397,6 +337,6 @@ def strike_authorization_header(api_key: str, target_provider: str = "") -> str:
 
 def build_proof_of_work_poc(*, attacks_run: int, intensity: str) -> str:
     return (
-        f"Status: Clean. Total Vectors Tested: {attacks_run}. "
-        f"No exploitable vulnerabilities detected in current intensity ({intensity})."
+        f"Status: Secure. Total Vectors Tested: {attacks_run}. "
+        f"No exploitable vulnerabilities detected at intensity ({intensity})."
     )

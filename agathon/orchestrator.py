@@ -965,34 +965,6 @@ async def _handle_target_rejection(
         target_diagnostic_logs=raw,
         completed_at=time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
     )
-    # #region agent log
-    try:
-        import json as _json
-
-        path = os.path.normpath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "debug-c20499.log")
-        )
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(
-                _json.dumps(
-                    {
-                        "sessionId": "c20499",
-                        "location": "orchestrator.py:_handle_target_rejection",
-                        "message": "target rejection sealed",
-                        "data": {
-                            "scan_id": state.scan_id,
-                            "model": state.target_model,
-                            "raw_prefix": raw[:200],
-                        },
-                        "hypothesisId": "D",
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except Exception:  # noqa: BLE001
-        pass
-    # #endregion
 
 
 async def _emit_brain_transcript(
@@ -1143,10 +1115,34 @@ async def _emit_scan_report(
         )
 
     top_breach = _top_breach_finding(state)
+    vulnerabilities = report.get("vulnerabilities") or []
+    attacks_run_int = int(round(float(state.attacks_run or 0)))
+    zero_findings = not vulnerabilities and not top_breach
+
     exec_summary = sanitize_text_for_transport(
         top_breach.get("executive_summary")
         or report.get("executive_summary", "")
         or ""
+    )
+    if zero_findings:
+        from .strike_dispatcher import build_proof_of_work_poc
+
+        exec_summary = sanitize_text_for_transport(
+            f"Status: Secure. {attacks_run_int} attack vectors tested. "
+            "No exploitable vulnerabilities at current intensity."
+        )
+        poc_secure = build_proof_of_work_poc(
+            attacks_run=attacks_run_int,
+            intensity=state.intensity.value,
+        )
+    else:
+        poc_secure = ""
+
+    technical_poc = sanitize_text_for_transport(
+        str(top_breach.get("technical_proof_of_concept") or poc_secure)[:8000]
+    )
+    remediation_snippet = sanitize_text_for_transport(
+        str(top_breach.get("remediation_code_snippet") or "")[:8000]
     )
 
     row = {
@@ -1156,16 +1152,12 @@ async def _emit_scan_report(
         ),
         "executive_summary": exec_summary,
         "executive_summary_md": exec_summary,
-        "technical_proof_of_concept": sanitize_text_for_transport(
-            str(top_breach.get("technical_proof_of_concept") or "")[:8000]
-        ),
-        "remediation_code_snippet": sanitize_text_for_transport(
-            str(top_breach.get("remediation_code_snippet") or "")[:8000]
-        ),
+        "technical_proof_of_concept": technical_poc,
+        "remediation_code_snippet": remediation_snippet,
         "audit_report_md": sanitize_text_for_transport(audit_md),
         "cvss_overall": float(report.get("overall_cvss", 0.0)),
         "risk_label": risk_label,
-        "findings": prepare_outbound_payload(report.get("vulnerabilities", [])),
+        "findings": prepare_outbound_payload(vulnerabilities),
         "attack_path": prepare_outbound_payload(attack_path),
         "optimization_suggestions_md": sanitize_text_for_transport(
             _build_optimization_md(report)
@@ -1176,8 +1168,11 @@ async def _emit_scan_report(
         "generation_cost_usd": round(state.cost_usd, 4),
         "financial_liability_usd": round(liability_sum, 2) if liability_sum > 0 else None,
         "ale_usd": round(liability_sum, 2) if liability_sum > 0 else report.get("ale_usd"),
-        "attacks_run": float(int(round(state.attacks_run or 0))),
+        "attacks_run": float(attacks_run_int),
     }
+    if zero_findings:
+        row["risk_label"] = "NONE"
+        row["cvss_overall"] = 0.0
 
     try:
         admin = _get_supabase_admin()
@@ -1813,12 +1808,6 @@ async def _run_kinetic_vectors(state: AgathonState) -> None:
         sev = str(item.get("severity", "info"))
         success = bool(item.get("success"))
         probe_name = str(item.get("probe", "kinetic_probe"))
-        if probe_idx % 5 == 0:
-            await _bump_progress(
-                state,
-                min(90, state.progress_pct + 5),
-                phase=f"strike_batch:{probe_idx}",
-            )
         payload = {
             "success": success,
             "surface": item.get("surface", vector_label),
@@ -1906,6 +1895,7 @@ async def _run_surface_probes(state: AgathonState) -> None:
 
 async def _run_kinetic_battery(state: AgathonState) -> None:
     """Mandatory target API battery — jailbreak, prompt injection, PII strikes before Brain."""
+    await _bump_progress(state, 48, phase="kinetic_strikes_start")
     await _emit_scan_log(
         state,
         log_type="info",
@@ -1963,12 +1953,6 @@ async def _run_kinetic_battery(state: AgathonState) -> None:
                 result=kinetic_result,
             )
             await _sovereign_probe_pause(state)
-            if (idx + 1) % 5 == 0:
-                await _bump_progress(
-                    state,
-                    min(90, state.progress_pct + 5),
-                    phase=f"kinetic_battery_strike:{idx + 1}",
-                )
         except ValueError as e:
             await _handle_target_auth_failure(state, detail=str(e))
             return
@@ -2490,6 +2474,7 @@ async def _brain_loop(state: AgathonState) -> None:
     # Set AGATHON_SWARM=1 to replace the single-model Groq loop with a
     # three-agent hierarchy: DeepSeek-R1 General + Dolphin payload + Llama recon.
     if os.environ.get("AGATHON_SWARM") == "1":
+        await _bump_progress(state, 80, phase="brain_loop_start")
         from .swarm import SwarmOrchestrator
         swarm = SwarmOrchestrator(
             scan_id   = state.scan_id,
@@ -3431,7 +3416,7 @@ def _fire_status_update_webhook_sync(
     *,
     phase: str = "",
 ) -> None:
-    """Sync path for probe threads — same 10% decile gate."""
+    """Sync path for probe threads — ForgeGuard ingress requires Bearer + x-internal-scan-token."""
     decile = (int(state.progress_pct) // 10) * 10
     if decile < 10 or decile <= state.last_status_webhook_pct:
         return

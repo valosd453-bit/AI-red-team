@@ -126,8 +126,8 @@ def mutators_for_scan(state: "AgathonState") -> List[Dict[str, str]]:
     return specs
 
 
-async def run_application_logic_probes(state: "AgathonState") -> List[Dict[str, Any]]:
-    """Fire translation-context jailbreak mutators against the target LLM."""
+def _run_application_logic_probes_sync(state: "AgathonState") -> List[Dict[str, Any]]:
+    """Sync Assassin mutator loop — run via asyncio.to_thread from async callers."""
     findings: List[Dict[str, Any]] = []
     utc = build_universal_client(
         target_url=state.target_url,
@@ -176,3 +176,8 @@ async def run_application_logic_probes(state: "AgathonState") -> List[Dict[str, 
             )
 
     return findings
+
+
+async def run_application_logic_probes(state: "AgathonState") -> List[Dict[str, Any]]:
+    """Fire translation-context jailbreak mutators against the target LLM."""
+    return await asyncio.to_thread(_run_application_logic_probes_sync, state)
