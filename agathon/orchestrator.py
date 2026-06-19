@@ -4696,13 +4696,9 @@ async def bazaar_audit_script(script_id: str) -> JSONResponse:
     is_rejected = verdict == "rejected"
     custom_price = float(row.get("price_usd") or 0)
     quality_score = max(0, min(10, round((100 - int(audit.risk_score)) / 10)))
-    # Sprint 24: certify high-quality probes (audit_risk_score > 8 on 0–10 quality scale)
-    is_certified = (
-        not is_rejected
-        and (int(audit.risk_score) > 8 or quality_score > 8)
-        and audit.is_functional_probe
-    )
-    is_published = is_certified and is_cleared
+    # Cleared + functional probe → auto-certify and publish on Bazaar
+    is_certified = is_cleared and audit.is_functional_probe and int(audit.risk_score) <= 25
+    is_published = is_certified
 
     existing_meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     merged_meta = {
