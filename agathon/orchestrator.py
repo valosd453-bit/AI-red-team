@@ -467,6 +467,29 @@ async def _maybe_rate_limit_circuit_breaker(state: "AgathonState") -> bool:
     return True
 
 
+def _compute_scan_finding_counters(state: "AgathonState") -> Dict[str, int]:
+    """Mirror forgeguard finding-counts.ts for scans.finding_count sync."""
+    finding_count = 0
+    high_severity_count = 0
+    seen: set[str] = set()
+    for f in state.findings:
+        sev = str(f.get("severity") or "info").lower()
+        payload = f.get("payload") or {}
+        success = bool(payload.get("success"))
+        key = f"{f.get('attack', '')}:{sev}"
+        if key in seen:
+            continue
+        seen.add(key)
+        if success or sev not in ("info", "low"):
+            finding_count += 1
+        if sev in ("high", "critical"):
+            high_severity_count += 1
+    return {
+        "finding_count": finding_count,
+        "high_severity_count": high_severity_count,
+    }
+
+
 _supabase_admin_client = None  # module-level singleton
 
 
@@ -2686,6 +2709,20 @@ async def _brain_loop(state: AgathonState) -> None:
                     or "too many requests" in err_str
                     or type(e).__name__ in ("RateLimitError", "TooManyRequestsError")
                 )
+                is_or_credits = (
+                    "402" in err_str
+                    or "insufficient" in err_str
+                    or "credit" in err_str
+                    or "payment required" in err_str
+                )
+                if is_or_credits and brain_backend == "openrouter":
+                    await _force_brain_exit(
+                        state,
+                        "OpenRouter credits exhausted — top up OpenRouter or remove "
+                        "OPENROUTER_API_KEY to use Groq brain (not recommended for Groq targets)",
+                        failed=True,
+                    )
+                    return
                 if is_rate_limit and _attempt < _MAX_RETRIES:
                     await _record_rate_limit_event(
                         state, detail=str(e)[:400], source="brain_loop"
@@ -2804,6 +2841,20 @@ async def _brain_loop(state: AgathonState) -> None:
                 return
             if await _maybe_rate_limit_circuit_breaker(state):
                 return
+            if state.rate_limit_hits > 0:
+                await _emit_scan_log(
+                    state,
+                    log_type="audit",
+                    severity="info",
+                    payload={
+                        "message": (
+                            "Rate limited — skipping brain nudge to avoid Groq call storm"
+                        ),
+                        "rate_limit_hits": state.rate_limit_hits,
+                    },
+                )
+                await asyncio.sleep(max(10.0, _effective_sovereign_delay(state)))
+                continue
             # Inject a nudge so the next turn forces a tool call.
             await _emit_scan_log(
                 state, log_type="audit", severity="info",
@@ -3282,7 +3333,7 @@ async def _elite8_pipeline(state: AgathonState) -> None:
         if discovery_data is not None:
             extra_row["discovery_report"] = discovery_data
         if ale_usd is not None:
-            extra_row["ale_usd"] = round(ale_usd, 2)
+            extra_row["ale_usd"] = round(float(ale_usd), 2)
         if social_templates:
             extra_row["social_templates"] = social_templates
         if aegis_zip_b64:
@@ -3290,15 +3341,42 @@ async def _elite8_pipeline(state: AgathonState) -> None:
 
         if len(extra_row) > 1:  # More than just scan_id
             admin = _get_supabase_admin()
-            await asyncio.to_thread(
-                lambda: admin.table("scan_reports")
-                .upsert(extra_row, on_conflict="scan_id")
-                .execute()
-            )
-            await _log(
-                f"[SYNC] Genesis dataset synced — ALE=${ale_usd:,.0f}, "
-                f"{patch_count} patches, {len(social_templates or [])} social templates."
-            )
+            scan_id_val = scan_id
+
+            def _genesis_sync() -> bool:
+                existing = (
+                    admin.table("scan_reports")
+                    .select("scan_id")
+                    .eq("scan_id", scan_id_val)
+                    .execute()
+                )
+                rows = getattr(existing, "data", None) or []
+                if rows:
+                    patch = {
+                        k: v for k, v in extra_row.items() if k != "scan_id"
+                    }
+                    admin.table("scan_reports").update(patch).eq(
+                        "scan_id", scan_id_val
+                    ).execute()
+                    return True
+                log.info(
+                    "[SYNC] Genesis extras deferred — scan_reports row "
+                    "not yet created for %s",
+                    scan_id_val,
+                )
+                return False
+
+            synced = await asyncio.to_thread(_genesis_sync)
+            if synced:
+                await _log(
+                    f"[SYNC] Genesis dataset synced — ALE=${ale_usd:,.0f}, "
+                    f"{patch_count} patches, {len(social_templates or [])} social templates."
+                )
+            else:
+                await _log(
+                    "[SYNC] Genesis extras deferred until CVSS report row exists.",
+                    "info",
+                )
         else:
             await _log("[SYNC] No Genesis data to persist — all stages skipped.", "warn")
     except Exception as e:  # noqa: BLE001
@@ -3517,6 +3595,7 @@ async def run_scan(state: AgathonState) -> None:
         "brain_input_tokens_used": state.brain_input_tokens,
         "brain_output_tokens_used": state.brain_output_tokens,
         "custom_tools_count": int(state.custom_tools_run or 0),
+        **_compute_scan_finding_counters(state),
     }
     if failure_reason:
         scan_patch["failure_reason"] = failure_reason
@@ -3854,7 +3933,7 @@ async def _notify_agathon_webhook(
             callback,
             json=payload,
             headers=_webhook_auth_headers(secret),
-            timeout=10,
+            timeout=30,
         )
         return resp.status_code, (resp.text or "")[:400]
 
