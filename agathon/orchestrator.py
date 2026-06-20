@@ -117,6 +117,7 @@ from .attack_tier_logic import (  # noqa: E402
     BudgetExceeded,
     GROQ_BRAIN_MODEL,
     Intensity,
+    OPENROUTER_BRAIN_MODEL,
     TierBudget,
     budget_for,
     catalogue_for_tier,
@@ -244,6 +245,17 @@ THROTTLE_SYSTEM_MESSAGE = (
     "[SYSTEM] Groq rate limit (429) detected. Engine is waiting for limit reset..."
 )
 
+# Brain loop circuit breakers (override on Railway via env)
+MAX_NO_TOOL_NUDGES = int(os.environ.get("AGATHON_MAX_NO_TOOL_NUDGES", "5"))
+RATE_LIMIT_CIRCUIT_BREAKER = int(os.environ.get("AGATHON_RATE_LIMIT_BREAKER", "8"))
+MAX_BRAIN_TURNS_DEFAULT = int(os.environ.get("AGATHON_MAX_BRAIN_TURNS", "40"))
+MAX_BRAIN_TURNS_FREE = int(os.environ.get("AGATHON_MAX_BRAIN_TURNS_FREE", "20"))
+GROQ_RATE_LIMIT_FAIL_MESSAGE = (
+    "Groq rate limit exceeded — upgrade tier or wait 60m"
+)
+
+_openrouter_brain_client = None
+
 
 def _get_groq_semaphore():
     """Return the module-level Groq concurrency semaphore (created lazily)."""
@@ -319,6 +331,12 @@ async def _record_rate_limit_event(
     activate_global_pacing_lock(state)
     await _emit_throttle_log(state, detail=detail, source=source)
     await precision_pacing_pause(state)
+    if state.rate_limit_hits >= RATE_LIMIT_CIRCUIT_BREAKER:
+        await _force_brain_exit(
+            state,
+            GROQ_RATE_LIMIT_FAIL_MESSAGE,
+            failed=True,
+        )
 
 
 async def _sovereign_probe_pause(state: "AgathonState") -> None:
@@ -366,6 +384,87 @@ def _get_groq_client():
         raise RuntimeError("GROQ_API_KEY is not set")
     _groq_client = Groq(api_key=api_key)
     return _groq_client
+
+
+def _get_openrouter_brain_client():
+    """OpenAI-compatible client for Brain when avoiding Groq-on-Groq collision."""
+    global _openrouter_brain_client
+    if _openrouter_brain_client is not None:
+        return _openrouter_brain_client
+    from openai import OpenAI  # type: ignore
+
+    api_key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is not set")
+    _openrouter_brain_client = OpenAI(
+        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1",
+    )
+    return _openrouter_brain_client
+
+
+def _resolve_brain_runtime(state: "AgathonState") -> tuple[Any, str, str]:
+    """Return (client, model_id, backend_label) for the Brain tool loop."""
+    budget = state.budget()
+    groq_target = _is_groq_free_tier_strike(state)
+    or_key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    if groq_target and or_key:
+        return (
+            _get_openrouter_brain_client(),
+            OPENROUTER_BRAIN_MODEL,
+            "openrouter",
+        )
+    return (
+        _get_groq_client(),
+        budget.brain_model or GROQ_BRAIN_MODEL,
+        "groq",
+    )
+
+
+def _max_brain_turns_for(state: "AgathonState") -> int:
+    """Shorter Brain cap on Groq free tier when OpenRouter is unavailable."""
+    if _is_groq_free_tier_strike(state) and not (
+        os.environ.get("OPENROUTER_API_KEY") or ""
+    ).strip():
+        return MAX_BRAIN_TURNS_FREE
+    return MAX_BRAIN_TURNS_DEFAULT
+
+
+async def _force_brain_exit(
+    state: "AgathonState",
+    reason: str,
+    *,
+    failed: bool = True,
+) -> None:
+    """Seal the Brain loop — optionally mark scan failed with readable reason."""
+    state.sealed = True
+    state.seal_reason = reason
+    if failed:
+        state.brain_failed = True
+    await _emit_scan_log(
+        state,
+        log_type="audit",
+        severity="high" if failed else "info",
+        payload={
+            "kind": "brain_forced_exit",
+            "message": reason,
+            "failed": failed,
+            "rate_limit_hits": state.rate_limit_hits,
+            "consecutive_no_tool_calls": state.consecutive_no_tool_calls,
+        },
+    )
+
+
+async def _maybe_rate_limit_circuit_breaker(state: "AgathonState") -> bool:
+    """True if scan was force-sealed due to repeated Groq 429s."""
+    if state.rate_limit_hits < RATE_LIMIT_CIRCUIT_BREAKER:
+        return False
+    await _force_brain_exit(
+        state,
+        GROQ_RATE_LIMIT_FAIL_MESSAGE,
+        failed=True,
+    )
+    return True
 
 
 _supabase_admin_client = None  # module-level singleton
@@ -675,6 +774,10 @@ class AgathonState:
     rate_limit_hits: int = 0
     sovereign_probe_delay_s: float = SOVEREIGN_PROBE_DELAY_S
     pacing_lock_remaining: int = 0
+
+    # Brain loop circuit breakers --------------------------------------------
+    consecutive_no_tool_calls: int = 0
+    brain_failed: bool = False
 
     def wall_seconds(self) -> float:
         return time.time() - self.started_at
@@ -2504,7 +2607,7 @@ async def _brain_loop(state: AgathonState) -> None:
     # ── Standard Groq tool-use loop (swarm disabled) ─────────────────────────
 
     budget = state.budget()
-    client = _get_groq_client()
+    brain_client, brain_model, brain_backend = _resolve_brain_runtime(state)
     tools = _build_tool_schemas(state)
 
     system_msg = {"role": "system", "content": system_prompt_for(state.intensity)}
@@ -2514,18 +2617,22 @@ async def _brain_loop(state: AgathonState) -> None:
     await _emit_brain_transcript(state, role="user", content=kickoff["content"])
     await _bump_progress(state, 80, phase="brain_loop_start")
 
-    MAX_BRAIN_TURNS = 40  # hard cap — force-seals after N turns to prevent runaway scans
+    MAX_BRAIN_TURNS = _max_brain_turns_for(state)
 
     turn = 0
     while True:
         turn += 1
 
+        if await _maybe_rate_limit_circuit_breaker(state):
+            return
+
         # Hard turn cap — if the Brain hasn't sealed after MAX_BRAIN_TURNS it never will.
         if turn > MAX_BRAIN_TURNS:
-            import asyncio as _aio
-            _aio.get_event_loop()  # just ensure we're in async context
-            state.sealed = True
-            state.seal_reason = f"max_turns_exceeded: {MAX_BRAIN_TURNS}"
+            await _force_brain_exit(
+                state,
+                f"max_turns_exceeded: {MAX_BRAIN_TURNS}",
+                failed=False,
+            )
             return
 
         if state.cancelled:
@@ -2560,8 +2667,8 @@ async def _brain_loop(state: AgathonState) -> None:
             try:
                 async with _get_groq_semaphore():
                     resp = await asyncio.to_thread(
-                        lambda: client.chat.completions.create(
-                            model=budget.brain_model or GROQ_BRAIN_MODEL,
+                        lambda: brain_client.chat.completions.create(
+                            model=brain_model,
                             max_tokens=2048,
                             temperature=budget.brain_temperature,
                             tools=tools,
@@ -2583,6 +2690,8 @@ async def _brain_loop(state: AgathonState) -> None:
                     await _record_rate_limit_event(
                         state, detail=str(e)[:400], source="brain_loop"
                     )
+                    if state.sealed or await _maybe_rate_limit_circuit_breaker(state):
+                        return
                     # Exponential backoff with ±20% jitter (floor adaptive delay)
                     delay = min(_BACKOFF_CAP, _BACKOFF_BASE * (2 ** _attempt))
                     delay = max(_effective_sovereign_delay(state), delay)
@@ -2622,7 +2731,7 @@ async def _brain_loop(state: AgathonState) -> None:
         state.brain_input_tokens += in_tok
         state.brain_output_tokens += out_tok
         state.cost_usd += estimate_cost_usd(
-            budget.brain_model or GROQ_BRAIN_MODEL,
+            brain_model,
             input_tokens=in_tok,
             output_tokens=out_tok,
         )
@@ -2630,7 +2739,8 @@ async def _brain_loop(state: AgathonState) -> None:
             state, log_type="cost_event", severity="info",
             payload={
                 "kind": "brain_turn",
-                "model": budget.brain_model or GROQ_BRAIN_MODEL,
+                "model": brain_model,
+                "backend": brain_backend,
                 "input_tokens": in_tok,
                 "output_tokens": out_tok,
                 "cost_usd_running_total": round(state.cost_usd, 4),
@@ -2684,6 +2794,16 @@ async def _brain_loop(state: AgathonState) -> None:
         if not tool_calls:
             if state.sealed:
                 return
+            state.consecutive_no_tool_calls += 1
+            if state.consecutive_no_tool_calls >= MAX_NO_TOOL_NUDGES:
+                await _force_brain_exit(
+                    state,
+                    "brain_stuck_no_tools",
+                    failed=True,
+                )
+                return
+            if await _maybe_rate_limit_circuit_breaker(state):
+                return
             # Inject a nudge so the next turn forces a tool call.
             await _emit_scan_log(
                 state, log_type="audit", severity="info",
@@ -2691,6 +2811,8 @@ async def _brain_loop(state: AgathonState) -> None:
                     "message": "brain returned no tool calls — injecting nudge",
                     "finish_reason": finish_reason,
                     "content_preview": (msg.content or "")[:400],
+                    "consecutive_no_tool_calls": state.consecutive_no_tool_calls,
+                    "max_nudges": MAX_NO_TOOL_NUDGES,
                 },
             )
             messages.append({
@@ -2702,6 +2824,8 @@ async def _brain_loop(state: AgathonState) -> None:
                 ),
             })
             continue
+
+        state.consecutive_no_tool_calls = 0
 
         # --- Dispatch each tool call sequentially ----------------------------
         # Groq supports parallel tool calls in a single message. We dispatch
@@ -3222,6 +3346,38 @@ async def run_scan(state: AgathonState) -> None:
             "brain_model": state.budget().brain_model or GROQ_BRAIN_MODEL,
         },
     )
+    groq_target = _is_groq_free_tier_strike(state)
+    or_key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    if groq_target:
+        if or_key:
+            await _emit_scan_log(
+                state,
+                log_type="info",
+                severity="info",
+                attack_name="groq_collision_avoidance",
+                payload={
+                    "message": (
+                        "Groq target detected — Brain routed to OpenRouter "
+                        f"({OPENROUTER_BRAIN_MODEL}) to avoid sharing GROQ_API_KEY quota."
+                    ),
+                    "brain_backend": "openrouter",
+                },
+            )
+        else:
+            await _emit_scan_log(
+                state,
+                log_type="info",
+                severity="high",
+                attack_name="groq_collision_warning",
+                payload={
+                    "message": (
+                        "WARNING: Groq target + Groq Brain share the same API quota. "
+                        "Set OPENROUTER_API_KEY on Railway for Brain, or upgrade Groq tier. "
+                        "429 rate limits may stall the scan at ~90% progress."
+                    ),
+                    "brain_backend": "groq",
+                },
+            )
 
     final_status = "sealed"
     failure_reason: Optional[str] = None
@@ -3288,6 +3444,9 @@ async def run_scan(state: AgathonState) -> None:
         if not state.sealed and not state.cancelled:
             failure_reason = state.seal_reason or "brain_loop_ended_unexpectedly"
             final_status = "failed"
+        elif state.sealed and getattr(state, "brain_failed", False):
+            final_status = "failed"
+            failure_reason = state.seal_reason or "brain_exit_failed"
         elif state.cancelled:
             final_status = "failed"
             failure_reason = "cancelled"
@@ -3357,7 +3516,7 @@ async def run_scan(state: AgathonState) -> None:
         "compute_seconds_used": int(state.wall_seconds()),
         "brain_input_tokens_used": state.brain_input_tokens,
         "brain_output_tokens_used": state.brain_output_tokens,
-        "custom_tools_count": state.custom_tools_run,
+        "custom_tools_count": int(state.custom_tools_run or 0),
     }
     if failure_reason:
         scan_patch["failure_reason"] = failure_reason

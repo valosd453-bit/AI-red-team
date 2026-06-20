@@ -229,6 +229,10 @@ class BudgetExceeded(RuntimeError):
 # has comfortable context (128k) headroom for the chat digest.
 GROQ_BRAIN_MODEL = "llama-3.1-8b-instant"
 
+# When target is Groq-hosted, route Brain through OpenRouter to avoid sharing
+# GROQ_API_KEY quota between strikes and strategy (Groq-on-Groq collision).
+OPENROUTER_BRAIN_MODEL = "deepseek/deepseek-chat"
+
 # Free-tier deployment numbers are tuned for Groq's free quota and the
 # Railway free trial — a Greasy run will exhaust the free quota in one
 # scan, by design. Bump these once you're on a paid Groq plan.
