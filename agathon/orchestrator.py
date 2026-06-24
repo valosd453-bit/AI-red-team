@@ -3803,14 +3803,14 @@ async def _notify_vector_breach_webhook(
             callback,
             json=body,
             headers=_webhook_auth_headers(secret),
-            timeout=10,
+            timeout=30,
         )
         return resp.status_code, (resp.text or "")[:400]
 
     status_code, body_snippet = await asyncio.to_thread(_post)
     await _emit_scan_log(
         state,
-        log_type="webhook",
+        log_type="info",
         severity="info" if 200 <= status_code < 300 else "high",
         attack_name="vector_breach_webhook",
         payload={
@@ -3951,7 +3951,7 @@ async def _notify_agathon_webhook(
 
     await _emit_scan_log(
         state,
-        log_type="webhook",
+        log_type="info",
         severity="info" if 200 <= status_code < 300 else "high",
         attack_name="webhook_callback",
         payload={
