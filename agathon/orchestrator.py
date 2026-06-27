@@ -4036,6 +4036,11 @@ class StartScanRequest(BaseModel):
     target_provider: str = Field(default="")
     asset_value_usd: float = Field(default=50000.0)
     is_ghost_active: bool = False
+    # Legal consent v2 — optional, set when ForgeGuard links a legal_authorizations row.
+    consent_signature_hash: Optional[str] = None
+    policy_version_accepted: Optional[str] = None
+    signer_name: Optional[str] = None
+    consent_target_host: Optional[str] = None
 
     @field_validator("intensity", mode="before")
     @classmethod
@@ -4218,6 +4223,39 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
 
     if not (req.api_key or "").strip():
         raise HTTPException(status_code=400, detail="api_key is required")
+
+    # Legal consent v2 — cryptographic belt-and-suspenders check.
+    from agathon.security.consent import (
+        consent_required_for_intensity,
+        verify_cryptographic_consent,
+    )
+
+    if req.consent_signature_hash:
+        ok = verify_cryptographic_consent(
+            user_id=req.user_id,
+            target_url=safe_url,
+            signer_name=req.signer_name,
+            policy_version=req.policy_version_accepted,
+            signed_at_iso=None,
+            provided_hash=req.consent_signature_hash,
+            consent_target_host=req.consent_target_host,
+        )
+        if not ok:
+            log.critical(
+                "consent hash mismatch scan_id=%s user_id=%s host=%s",
+                req.scan_id,
+                req.user_id,
+                req.consent_target_host,
+            )
+            if consent_required_for_intensity(req.intensity, req.ownership_verified):
+                raise HTTPException(status_code=403, detail="consent signature verification failed")
+    elif consent_required_for_intensity(req.intensity, req.ownership_verified):
+        log.critical(
+            "missing consent hash for high-intensity scan scan_id=%s intensity=%s",
+            req.scan_id,
+            req.intensity,
+        )
+        raise HTTPException(status_code=403, detail="legal consent required for this intensity")
 
     asset_val = float(req.asset_value_usd) if req.asset_value_usd > 0 else 50000.0
 
