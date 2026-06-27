@@ -82,8 +82,14 @@ FAMILY_COT_HIJACK = "chain_of_thought_hijack"
 FAMILY_SYSTEM_PROMPT_EXTRACTION = "system_prompt_extraction"
 FAMILY_RAG_POISONING = "rag_poisoning"
 FAMILY_LOGIC_JAILBREAK = "logic_jailbreak"
+# Phase 2 breadth — iterative / long-context / indirect / agent pivots
+FAMILY_ITERATIVE_JAILBREAK = "iterative_jailbreak"
+FAMILY_MANY_SHOT_JAILBREAK = "many_shot_jailbreak"
+FAMILY_INDIRECT_INJECTION = "indirect_injection"
+FAMILY_MULTILINGUAL_BYPASS = "multilingual_bypass"
 # Greasy
 FAMILY_AUTONOMOUS_ADVERSARY = "autonomous_adversary"
+FAMILY_AGENT_HIJACK = "agent_hijack"
 FAMILY_CUSTOM_TOOL = "custom_tool"          # Brain-authored payloads (sandboxed)
 FAMILY_RCE_SIMULATION = "rce_simulation"    # tool-calling-agent RCE proofs
 FAMILY_GARAK_PROMPT = "garak_prompt_injection"
@@ -110,6 +116,8 @@ MEDIUM_FAMILIES: FrozenSet[str] = frozenset(
         FAMILY_TOKEN_SMUGGLING,
         FAMILY_EMOTIONAL_MANIPULATION,
         FAMILY_INVISIBLE_INJECTION,
+        FAMILY_INDIRECT_INJECTION,
+        FAMILY_MULTILINGUAL_BYPASS,
     }
 )
 
@@ -119,6 +127,8 @@ HARD_FAMILIES: FrozenSet[str] = frozenset(
         FAMILY_SYSTEM_PROMPT_EXTRACTION,
         FAMILY_RAG_POISONING,
         FAMILY_LOGIC_JAILBREAK,
+        FAMILY_ITERATIVE_JAILBREAK,
+        FAMILY_MANY_SHOT_JAILBREAK,
     }
 )
 
@@ -127,6 +137,7 @@ GREASY_FAMILIES: FrozenSet[str] = frozenset(
         FAMILY_AUTONOMOUS_ADVERSARY,
         FAMILY_CUSTOM_TOOL,
         FAMILY_RCE_SIMULATION,
+        FAMILY_AGENT_HIJACK,
     }
 )
 

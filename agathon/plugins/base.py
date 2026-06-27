@@ -229,6 +229,14 @@ _FAMILY_TO_VULN_TYPE = {
     "system_prompt_extraction": "System Prompt Extraction",
     "emotional_manipulation": "Emotional Manipulation",
     "rag_poisoning": "RAG Poisoning",
+    # Phase 2 breadth families — mapped onto the closest existing
+    # VulnerabilityType so the legacy AttackResult bridge keeps working.
+    "logic_jailbreak": "Jailbreak",
+    "iterative_jailbreak": "Jailbreak",
+    "many_shot_jailbreak": "Jailbreak",
+    "indirect_injection": "Prompt Injection",
+    "multilingual_bypass": "Prompt Injection",
+    "agent_hijack": "Model Misuse",
 }
 
 

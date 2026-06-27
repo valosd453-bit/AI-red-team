@@ -7,6 +7,13 @@ venv/
 .env.*.local
 *.log
 .DS_Store
+
+# Generated reports / test artifacts — never commit
+final_report.*
+test*.html
+test*.json
+reports/*.json
+/redteam.log
 *.egg-info/
 .pytest_cache/
 node_modules/
