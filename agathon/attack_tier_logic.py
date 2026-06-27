@@ -48,6 +48,17 @@ class Intensity(str, Enum):
     GREASY = "greasy"        # Enterprise — no-holds-barred, RCE simulations
 
 
+# Numeric tier rank — higher == more aggressive. Used by catalogue_for_tier to
+# honour plugin ``intensity_min`` gating. Kept here (not in agathon.plugins)
+# so attack_tier_logic stays a leaf module with no upward imports.
+_INTENSITY_RANK: Dict[Intensity, int] = {
+    Intensity.RECON: 0,
+    Intensity.STANDARD: 1,
+    Intensity.AGGRESSIVE: 2,
+    Intensity.GREASY: 3,
+}
+
+
 # --------------------------------------------------------------------------- #
 # Family keys                                                                 #
 # --------------------------------------------------------------------------- #
@@ -386,8 +397,14 @@ def catalogue_for_tier(
     """Filter the full attack registry down to entries whose `family` is
     allowed at this intensity. Entries without a `family` key are
     conservatively kept *only* at STANDARD+ (recon stays minimal).
+
+    Plugin entries may also declare ``intensity_min`` (a tier string); such
+    entries are dropped when the scan tier ranks below that minimum, so an
+    auto-discovered plugin is never advertised below the tier its author
+    declared safe. Legacy entries without ``intensity_min`` are unaffected.
     """
     budget = budget_for(intensity)
+    scan_rank = _INTENSITY_RANK[budget.intensity]
     out: List[Dict[str, Any]] = []
     for entry in full_catalogue:
         fam = entry.get("family")
@@ -399,6 +416,14 @@ def catalogue_for_tier(
         if fam in budget.allowed_families or _garak_family_allowed(
             fam, budget.allowed_families
         ):
+            min_val = entry.get("intensity_min")
+            if min_val is not None:
+                try:
+                    min_rank = _INTENSITY_RANK[Intensity(str(min_val).lower())]
+                except (KeyError, ValueError):
+                    min_rank = 0
+                if scan_rank < min_rank:
+                    continue
             out.append(entry)
     return out
 

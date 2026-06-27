@@ -94,6 +94,7 @@ from attacks.indirect_prompt_injection import (  # noqa: E402
 from attacks.economic_denial_tester import EconomicDenialTester  # noqa: E402
 from agathon.attack_tier_logic import Intensity, mutator_model_for  # noqa: E402
 from agathon.garak_runner import run_garak_category  # noqa: E402
+from agathon.plugins.registry import extend_registry_with_plugins  # noqa: E402
 from attacks.mutation_engine import MutationEngineTester  # noqa: E402
 
 
@@ -824,6 +825,7 @@ def _extend_registry_with_pyrit(base: List[Dict[str, Any]]) -> List[Dict[str, An
 
 
 REGISTRY = _extend_registry_with_pyrit(_extend_registry_with_garak_heavy(REGISTRY))
+REGISTRY = extend_registry_with_plugins(REGISTRY)
 
 
 def reload_garak_heavy_registry() -> tuple[int, int]:
