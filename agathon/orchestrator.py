@@ -4041,6 +4041,9 @@ class StartScanRequest(BaseModel):
     policy_version_accepted: Optional[str] = None
     signer_name: Optional[str] = None
     consent_target_host: Optional[str] = None
+    # Phase 1 scope enforcement — verified host recorded by ForgeGuard.
+    scope_host: Optional[str] = None
+    scope_verified: bool = False
 
     @field_validator("intensity", mode="before")
     @classmethod
@@ -4256,6 +4259,16 @@ async def scan_start(req: StartScanRequest) -> StartScanResponse:
             req.intensity,
         )
         raise HTTPException(status_code=403, detail="legal consent required for this intensity")
+
+    # Phase 1 scope enforcement — ForgeGuard is the source of truth for scope.
+    # The engine still runs, but an unverified scope is logged for the audit trail.
+    if not req.scope_verified and not req.ownership_verified:
+        log.warning(
+            "scope not verified scan_id=%s target=%s scope_host=%s — proceeding (ForgeGuard authoritative)",
+            req.scan_id,
+            safe_url,
+            req.scope_host,
+        )
 
     asset_val = float(req.asset_value_usd) if req.asset_value_usd > 0 else 50000.0
 
