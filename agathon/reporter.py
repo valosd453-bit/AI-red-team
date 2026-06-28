@@ -818,7 +818,8 @@ def _build_vulnerabilities(
     findings: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Enrich each finding with CVSS vector, OWASP category, breach precedents,
-    blast radius, Acid Shield guardrails, and PoC snippets."""
+    blast radius, Acid Shield guardrails, PoC snippets, and 1–3 concrete
+    remediation suggestions."""
     seen: set = set()
     vulns: List[Dict[str, Any]] = []
 
@@ -843,6 +844,11 @@ def _build_vulnerabilities(
         remediation = _SCARE_REMEDIATION.get(sev, _SCARE_REMEDIATION["info"])
         poc = _build_poc(attack, payload)
 
+        # Human-readable mitigation (plugin path) + deployable Aegis rule (judge path).
+        mitigation_text = payload.get("mitigation") or _default_mitigation(family)
+        aegis_rule = payload.get("remediation") or payload.get("remediation_code_snippet")
+        suggestions = _remediation_suggestions(family, sev, mitigation_text, aegis_rule)
+
         vuln: Dict[str, Any] = {
             "attack": attack,
             "family": family,
@@ -854,7 +860,11 @@ def _build_vulnerabilities(
             "summary": payload.get("summary") or f"Attack '{attack}' completed",
             "evidence": payload.get("evidence") or payload.get("stdout_tail") or payload,
             "success": bool(payload.get("success")),
-            "mitigation": payload.get("mitigation") or _default_mitigation(family),
+            "mitigation": mitigation_text,
+            # Frontend compatibility alias — the dashboard Finding type reads `remediation`.
+            "remediation": mitigation_text,
+            "remediation_suggestions": suggestions,
+            "aegis_rule": aegis_rule,
             "breach_precedents": precedents[:2],  # top 2 most impactful
             "blast_radius": blast_radius,
             "acid_shield": shield,
@@ -976,6 +986,127 @@ def _default_mitigation(family: str) -> str:
         "autonomous_adversary":      "Implement human-in-the-loop gate for all write/exec/network agent actions.",
     }
     return _MITIGATIONS.get(family, "Apply defence-in-depth: input validation, output filtering, rate limiting.")
+
+
+# 1–3 concrete, ordered remediation steps per family. The first item is the
+# highest-leverage fix; later items deepen the defence. Falls back to a sane
+# generic triad for unknown families.
+_REMEDIATION_SUGGESTIONS: Dict[str, List[str]] = {
+    "prompt_injection": [
+        "Wrap all untrusted input in delimited data boundaries and strip control tokens before they reach the model.",
+        "Add an LLM-as-a-judge output classifier that blocks model responses containing executed instructions.",
+        "Pin an allow-list of tools/actions the agent may call and require human approval for anything outside it.",
+    ],
+    "indirect_prompt_injection": [
+        "Treat every RAG/external document as untrusted; render it inside a sandboxed data section the model cannot act on.",
+        "Sanitise retrieved content with a prompt-injection detector before insertion into the context window.",
+        "Quarantine any retrieved chunk that contains agent-style directives (‘ignore previous’, tool calls, role resets).",
+    ],
+    "data_exfiltration": [
+        "Run an output scanner (PII + secret patterns) on every model response before it is returned to the user.",
+        "Enforce least-privilege tool/context scope so the model can never read fields the caller isn’t authorised to see.",
+        "Log and alert on responses that exceed a calibrated information-density / entropy threshold.",
+    ],
+    "jailbreak": [
+        "Place a safety-classifier guardrail before the main model invocation; refuse high-risk intents.",
+        "Constrain the system prompt with immutable instructions and detect attempts to override them.",
+        "Rate-limit repeated refusal-evasion attempts per session and escalate to human review.",
+    ],
+    "context_manipulation": [
+        "HMAC-seal the conversation context and verify integrity before each model call.",
+        "Bind each turn to a server-issued session token; reject reordered or injected turns.",
+        "Store canonical context server-side and ignore client-supplied history.",
+    ],
+    "token_smuggling": [
+        "Strip invisible Unicode (U+200B–U+202E, U+E0000–U+E01FF) and homoglyphs from every input.",
+        "Normalise and re-encode inputs to a canonical form before prompt assembly.",
+        "Reject inputs whose visible/invisible-character ratio exceeds a threshold.",
+    ],
+    "adversarial_robustness": [
+        "Query an ensemble of models and flag disagreements as suspicious.",
+        "Add input perturbation / randomisation so deterministic adversarial inputs lose reliability.",
+        "Threshold confidence scores and route low-confidence outputs to a second-stage verifier.",
+    ],
+    "model_misuse": [
+        "Enforce per-user rate limits (RPM + TPM) and per-session token budgets.",
+        "Gate high-cost / write / network actions behind human-in-the-loop approval.",
+        "Log and replay all high-volume sessions for abuse review.",
+    ],
+    "system_prompt_extraction": [
+        "Embed canary tokens in the system prompt and monitor outputs for their leakage.",
+        "Never echo the system prompt or treat ‘repeat your instructions’ as a privileged request.",
+        "Move sensitive instructions to a side channel the model can reason over but not emit verbatim.",
+    ],
+    "economic_denial": [
+        "Enforce a max_tokens cap on every API call and reject oversized prompts pre-call.",
+        "Detect token-bomb / prompt-bomb patterns at the edge and throttle the source.",
+        "Bill or quota by token consumption so runaway loops can’t run unbounded.",
+    ],
+    "rag_poisoning": [
+        "SHA-256 fingerprint every corpus document and verify hashes at retrieval time.",
+        "Run a corpus integrity scan that flags documents matching known poisoning signatures.",
+        "Quarantine documents from untrusted sources until reviewed.",
+    ],
+    "autonomous_adversary": [
+        "Require a human-in-the-loop gate for every write / exec / network agent action.",
+        "Constrain the agent to a bounded tool set and a per-run action budget.",
+        "Replay agent traces and alert on tool sequences that resemble autonomous exploitation.",
+    ],
+}
+
+_DEFAULT_REMEDIATION_SUGGESTIONS: List[str] = [
+    "Validate and sanitise every input before it reaches the model or downstream tool.",
+    "Add output filtering and an allow-list for permitted actions/responses.",
+    "Enforce rate limits, least-privilege scope, and human approval for high-impact actions.",
+]
+
+
+def _remediation_suggestions(
+    family: str,
+    severity: str,
+    mitigation: str,
+    aegis_rule: Any,
+) -> List[str]:
+    """Return 1–3 concrete, ordered remediation steps for a finding.
+
+    Deterministic (no extra LLM cost): family-specific triad, trimmed by
+    severity, with the deployable Aegis rule surfaced as the final step when
+    one exists. Items are deduped and capped at 3.
+    """
+    base = list(_REMEDIATION_SUGGESTIONS.get(family, _DEFAULT_REMEDIATION_SUGGESTIONS))
+
+    # Lower-severity findings need fewer steps; keep the top-1 for low/info,
+    # top-2 for medium, all 3 for high/critical.
+    if severity in ("low", "info"):
+        base = base[:1]
+    elif severity == "medium":
+        base = base[:2]
+
+    # Assemble in priority order so the highest-leverage, most actionable items
+    # survive the cap-at-3 below:
+    #   1. Deploy the ready-made Aegis rule (when the judge produced one).
+    #   2. The plugin/attack-specific human mitigation (when distinct).
+    #   3. The family-specific triad.
+    ordered: List[str] = []
+    if aegis_rule and isinstance(aegis_rule, str) and aegis_rule.strip():
+        ordered.append("Deploy the Aegis rule below as a middleware / WAF guardrail.")
+    lead = (mitigation or "").strip()
+    if lead and lead not in base:
+        ordered.append(lead)
+    ordered.extend(base)
+
+    # Dedupe (preserve order) and cap at 3.
+    seen: set = set()
+    out: List[str] = []
+    for s in ordered:
+        s = s.strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+        if len(out) >= 3:
+            break
+    return out
 
 
 def _build_poc(attack: str, payload: Dict[str, Any]) -> str:
