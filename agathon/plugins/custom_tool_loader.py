@@ -11,6 +11,16 @@ from the ``custom_attack_tools`` table and enforces ``intensity_min`` + audit
 status. The actual sandboxed execution lives in the orchestrator so it can
 reuse the Docker runner + scan state.
 
+**Probe contract (SDK):** approved tools are executed as raw ``probe.py`` inside
+Docker. The sandbox injects environment variables only — there is no ``async
+def run(ctx)`` hook:
+
+- ``TARGET_URL`` — scan target URL (or test URL for dry-runs)
+- ``TARGET_MODEL`` — model identifier string
+- ``TARGET_API_KEY`` — operator scan credential (empty for dry-runs)
+
+Probes should print findings to stdout (JSON recommended) and exit 0 on success.
+
 Table shape (migration 20260628_custom_attack_tools.sql):
     id, author_id, name, family, intensity_min, code, status, audit_result,
     network_allowed, created_at, updated_at
@@ -108,3 +118,16 @@ def get_operator_tool(
     except Exception as exc:  # noqa: BLE001
         log.warning("[custom_tool_loader] get_operator_tool failed: %s", exc)
         return None
+
+
+def format_operator_arsenal_block(tools: List[CustomTool]) -> str:
+    """Human-readable catalog block for the Brain kickoff message."""
+    if not tools:
+        return ""
+    lines = ["Operator arsenal (run_operator_tool):"]
+    for t in tools:
+        net = "yes" if t.network_allowed else "no"
+        lines.append(
+            f"  - {t.name} [{t.family}, min={t.intensity_min}, network={net}]"
+        )
+    return "\n".join(lines)
