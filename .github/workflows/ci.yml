@@ -33,4 +33,4 @@ jobs:
         run: python -c "from agathon.orchestrator import app; print('ok')"
 
       - name: Health + SSRF tests
-        run: python -m pytest tests/test_health.py -q
+        run: python -m pytest tests/ -q
